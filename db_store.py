@@ -1,3 +1,4 @@
+# db_store.py
 import uuid
 from typing import Dict
 
@@ -5,6 +6,7 @@ import pandas as pd
 
 from db import get_conn
 
+# Columns used by the tracker UI
 TEXT_COLS = [
     "Date Applied",
     "Company",
@@ -21,22 +23,12 @@ TEXT_COLS = [
 
 def init_db() -> None:
     """
-    Creates the applications table (and a safe users table if it doesn't exist).
+    Creates tables used by the app (applications + resumes).
+    NOTE: users table is created by auth.py, but we keep admin_list_users resilient.
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # Users table (auth.py also creates it, but this avoids admin queries failing)
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    password_hash BYTEA NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-                """
-            )
-
-            # Applications table
+            # Applications tracker
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS applications (
@@ -56,13 +48,31 @@ def init_db() -> None:
                 );
                 """
             )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_app_user_id ON applications(user_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_app_created_at ON applications(created_at);")
 
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON applications(user_id);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON applications(created_at);")
+            # Resume versions library
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS resumes (
+                    resume_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    resume_text TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_res_user_id ON resumes(user_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_res_created_at ON resumes(created_at);")
+
         conn.commit()
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensures TEXT_COLS exist and are strings, and keeps only the expected columns.
+    """
     df = df.copy()
 
     for c in TEXT_COLS:
@@ -87,10 +97,13 @@ def ensure_row_ids(df: pd.DataFrame) -> pd.DataFrame:
         df["_row_id"] = df["_row_id"].fillna("").astype(str)
         missing = df["_row_id"].str.strip() == ""
         if missing.any():
-            df.loc[missing, "_row_id"] = [str(uuid.uuid4()) for _ in range(missing.sum())]
+            df.loc[missing, "_row_id"] = [str(uuid.uuid4()) for _ in range(int(missing.sum()))]
     return df
 
 
+# -------------------------
+# TRACKER FUNCTIONS
+# -------------------------
 def read_tracker_df(user_id: str) -> pd.DataFrame:
     init_db()
 
@@ -152,6 +165,10 @@ def append_row(user_id: str, row: Dict) -> None:
 
 
 def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
+    """
+    Replace the user's entire tracker with rows in df.
+    df should contain _row_id + TEXT_COLS (we'll coerce if needed).
+    """
     init_db()
     df = ensure_row_ids(_normalize_df(df))
 
@@ -213,14 +230,22 @@ def replace_with_uploaded_csv(user_id: str, uploaded_df: pd.DataFrame) -> None:
 
 
 def delete_all_for_user(user_id: str) -> None:
+    """
+    Deletes ALL tracker entries and resume versions for this user.
+    """
     init_db()
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM applications WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM resumes WHERE user_id = %s", (user_id,))
         conn.commit()
 
 
 def admin_list_users() -> pd.DataFrame:
+    """
+    Admin-only: list users + created_at + job counts.
+    Assumes users table exists (created by auth.py). If not, returns empty.
+    """
     init_db()
     query = """
         SELECT
@@ -238,3 +263,65 @@ def admin_list_users() -> pd.DataFrame:
             return pd.read_sql_query(query, conn)
         except Exception:
             return pd.DataFrame(columns=["user_id", "created_at", "jobs_count"])
+
+
+# -------------------------
+# RESUME LIBRARY FUNCTIONS
+# -------------------------
+def save_resume_version(user_id: str, name: str, resume_text: str) -> None:
+    init_db()
+    resume_id = str(uuid.uuid4())
+    name = (name or "").strip() or "Resume"
+    resume_text = (resume_text or "").strip()
+
+    if not resume_text:
+        raise ValueError("Resume text is empty.")
+
+    sql = """
+        INSERT INTO resumes (resume_id, user_id, name, resume_text)
+        VALUES (%s, %s, %s, %s)
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (resume_id, user_id, name, resume_text))
+        conn.commit()
+
+
+def list_resumes(user_id: str) -> pd.DataFrame:
+    init_db()
+    query = """
+        SELECT resume_id, name, created_at
+        FROM resumes
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+    """
+    with get_conn() as conn:
+        df = pd.read_sql_query(query, conn, params=(user_id,))
+    return df
+
+
+def load_resume_text(user_id: str, resume_id: str) -> str:
+    init_db()
+    sql = """
+        SELECT resume_text
+        FROM resumes
+        WHERE user_id = %s AND resume_id = %s
+        LIMIT 1
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id, resume_id))
+            row = cur.fetchone()
+    if not row:
+        raise ValueError("Resume not found.")
+    return row[0]
+
+
+def delete_resume_version(user_id: str, resume_id: str) -> None:
+    init_db()
+    sql = "DELETE FROM resumes WHERE user_id = %s AND resume_id = %s"
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id, resume_id))
+        conn.commit()

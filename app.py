@@ -3,6 +3,7 @@ from datetime import date, timedelta, datetime
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 from pypdf import PdfReader
 from docx import Document
 from autofill import extract_fields
@@ -17,17 +18,24 @@ from db_store import (
     overwrite_tracker_for_user,
     merge_uploaded_csv,
     replace_with_uploaded_csv,
-    # make sure you added these in db_store.py
     delete_all_for_user,
     admin_list_users,
+    # resumes
+    save_resume_version,
+    list_resumes,
+    load_resume_text,
+    delete_resume_version,
 )
 
-# auth helpers (make sure auth.py supports these)
-from auth import create_user, verify_user, change_password, delete_user
-
+from auth import (
+    create_user,
+    verify_user,
+    change_password,
+    delete_user,
+)
 
 # -------------------------
-# PAGE CONFIG + LIGHT UI POLISH
+# PAGE CONFIG + UI POLISH
 # -------------------------
 st.set_page_config(page_title="Internship Application Agent", layout="wide")
 st.title("Internship Application Agent")
@@ -40,9 +48,10 @@ st.markdown(
       section[data-testid="stSidebar"] { padding-top: 1rem; }
       h1, h2, h3 { letter-spacing: -0.02em; }
 
+      /* Cards */
       .card {
-        border: 1px solid rgba(49, 51, 63, 0.15);
-        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 16px;
         padding: 14px 16px;
         background: rgba(255,255,255,0.04);
         margin-bottom: 0.75rem;
@@ -50,9 +59,61 @@ st.markdown(
       .muted { color: rgba(255,255,255,0.65); }
       .small { font-size: 0.9rem; color: rgba(255,255,255,0.75); }
 
+      /* Alerts */
+      .alert {
+        border-radius: 16px;
+        padding: 12px 14px;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255,255,255,0.05);
+        margin: 0.35rem 0 0.9rem 0;
+      }
+      .alert-danger {
+        border-color: rgba(239, 68, 68, 0.45);
+        background: rgba(239, 68, 68, 0.10);
+      }
+      .alert-warn {
+        border-color: rgba(245, 158, 11, 0.45);
+        background: rgba(245, 158, 11, 0.10);
+      }
+      .alert-ok {
+        border-color: rgba(34, 197, 94, 0.35);
+        background: rgba(34, 197, 94, 0.08);
+      }
+
+      /* Status pills */
+      .pill {
+        display:inline-block;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255,255,255,0.06);
+        margin-left: 0.35rem;
+        white-space: nowrap;
+      }
+      .pill-interested { border-color: rgba(56, 189, 248, 0.40); background: rgba(56, 189, 248, 0.12); }
+      .pill-applied    { border-color: rgba(59, 130, 246, 0.40); background: rgba(59, 130, 246, 0.12); }
+      .pill-oa         { border-color: rgba(168, 85, 247, 0.40); background: rgba(168, 85, 247, 0.12); }
+      .pill-interview  { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.14); }
+      .pill-offer      { border-color: rgba(34, 197, 94, 0.45); background: rgba(34, 197, 94, 0.14); }
+      .pill-rejected   { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.14); }
+      .pill-ghosted    { border-color: rgba(148, 163, 184, 0.40); background: rgba(148, 163, 184, 0.10); }
+
+      /* Mini row cards */
+      .rowcard {
+        border-radius: 16px;
+        padding: 12px 14px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.04);
+        margin-bottom: 0.55rem;
+      }
+      .rowcard-danger { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.08); }
+      .rowcard-warn   { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.08); }
+
+      /* Buttons */
       div.stButton > button, div.stDownloadButton > button {
-        border-radius: 10px;
-        padding: 0.55rem 0.9rem;
+        border-radius: 12px;
+        padding: 0.55rem 0.95rem;
       }
     </style>
     """,
@@ -60,7 +121,6 @@ st.markdown(
 )
 
 tabs = st.tabs(["🧠 Generate Pack", "📌 Tracker"])
-
 
 # -------------------------
 # AUTH (LOGIN + SIGNUP)
@@ -100,7 +160,6 @@ def auth_box() -> str:
 
     st.stop()
 
-
 user_id = auth_box()
 
 # Sidebar header + logout
@@ -110,7 +169,7 @@ with st.sidebar:
         <div class="card">
           <div class="small">Signed in as</div>
           <div style="font-size:1.05rem;"><b>{user_id}</b></div>
-          <div class="muted small">Private tracker enabled ✅</div>
+          <div class="muted small">Neon (Postgres) tracker enabled ✅</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -120,9 +179,8 @@ with st.sidebar:
         st.session_state["user_id"] = ""
         st.rerun()
 
-
 # -------------------------
-# ACCOUNT SETTINGS (Change password / Delete account)
+# ACCOUNT SETTINGS (no email reminders)
 # -------------------------
 with st.sidebar.expander("⚙️ Account settings", expanded=False):
     st.markdown("#### Change password")
@@ -162,7 +220,6 @@ with st.sidebar.expander("⚙️ Account settings", expanded=False):
             except Exception as e:
                 st.error(str(e))
 
-
 # -------------------------
 # ADMIN VIEW (only for admins in secrets)
 # -------------------------
@@ -186,7 +243,6 @@ if is_admin:
             st.markdown(f"### Tracker for: {target}")
             st.dataframe(view_df, use_container_width=True)
         st.divider()
-
 
 # -------------------------
 # SESSION STATE DEFAULTS
@@ -213,7 +269,6 @@ if "show_add_form" not in st.session_state:
 if "tracker_last_saved" not in st.session_state:
     st.session_state["tracker_last_saved"] = ""
 
-
 # -------------------------
 # HELPERS
 # -------------------------
@@ -224,10 +279,8 @@ def read_pdf(file) -> str:
         pages.append(p.extract_text() or "")
     return "\n".join(pages).strip()
 
-
 def read_txt(file) -> str:
     return file.read().decode("utf-8", errors="ignore").strip()
-
 
 def make_docx(text: str) -> bytes:
     doc = Document()
@@ -237,13 +290,11 @@ def make_docx(text: str) -> bytes:
     doc.save(bio)
     return bio.getvalue()
 
-
 def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Applications")
     return bio.getvalue()
-
 
 def _coerce_editor_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -263,6 +314,18 @@ def _coerce_editor_types(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def _status_slug(status: str) -> str:
+    s = (status or "").strip().lower().replace(" ", "")
+    return s
+
+def render_status_pill(status: str) -> str:
+    slug = _status_slug(status)
+    klass = f"pill pill-{slug}" if slug else "pill"
+    return f'<span class="{klass}">{status}</span>'
+
+def safe_date_parse(series: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(series.astype(str), errors="coerce")
+    return dt.dt.date
 
 # -------------------------
 # TAB 1: GENERATE PACK
@@ -277,30 +340,71 @@ with tabs[0]:
         job_desc = st.text_area("Or paste job description", height=170, placeholder="Paste the job description…")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("### Step 2 — Resume + notes")
+        st.markdown("### Step 2 — Resume library + notes")
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        resume_file = st.file_uploader("Upload your resume (PDF or TXT)", type=["pdf", "txt"])
+
+        resumes_df = list_resumes(user_id)
+
+        if not resumes_df.empty:
+            rid_list = resumes_df["resume_id"].tolist()
+            selected_rid = st.selectbox(
+                "Saved resumes",
+                rid_list,
+                format_func=lambda rid: resumes_df.loc[resumes_df["resume_id"] == rid, "name"].values[0],
+            )
+
+            cA, cB, cC = st.columns([1, 1, 1])
+            with cA:
+                if st.button("Use selected", use_container_width=True):
+                    txt = load_resume_text(user_id, selected_rid)
+                    st.session_state["resume_text"] = txt
+                    st.session_state["resume_name"] = resumes_df.loc[
+                        resumes_df["resume_id"] == selected_rid, "name"
+                    ].values[0]
+                    st.success("Loaded ✅")
+                    st.rerun()
+            with cB:
+                if st.button("Delete selected", use_container_width=True):
+                    delete_resume_version(user_id, selected_rid)
+                    st.success("Deleted ✅")
+                    st.rerun()
+            with cC:
+                st.caption("Tip: store multiple versions (DS / DE / Analyst).")
+
+        st.divider()
+        resume_file = st.file_uploader("Upload resume (PDF or TXT)", type=["pdf", "txt"])
+
+        if resume_file is not None:
+            try:
+                if resume_file.type == "application/pdf":
+                    parsed = read_pdf(resume_file)
+                else:
+                    parsed = read_txt(resume_file)
+
+                st.session_state["resume_text"] = parsed
+                st.session_state["resume_name"] = resume_file.name
+
+                if st.button("Save as new version", use_container_width=True):
+                    save_resume_version(user_id, resume_file.name, parsed)
+                    st.success("Saved ✅")
+                    st.rerun()
+
+            except Exception as e:
+                st.error(f"Could not read resume file. Error: {e}")
 
         c1, c2 = st.columns([1, 1])
         with c1:
-            if st.button("🧹 Clear stored resume"):
+            if st.button("🧹 Clear active resume", use_container_width=True):
                 st.session_state["resume_text"] = ""
                 st.session_state["resume_name"] = ""
-                st.success("Stored resume cleared ✅")
+                st.success("Cleared ✅")
                 st.rerun()
         with c2:
-            st.caption(f"Stored: **{st.session_state['resume_name']}**" if st.session_state["resume_name"] else "No resume stored yet.")
-
-        if resume_file is not None and resume_file.name != st.session_state["resume_name"]:
-            try:
-                if resume_file.type == "application/pdf":
-                    st.session_state["resume_text"] = read_pdf(resume_file)
-                else:
-                    st.session_state["resume_text"] = read_txt(resume_file)
-                st.session_state["resume_name"] = resume_file.name
-                st.success("Resume saved in memory ✅")
-            except Exception as e:
-                st.error(f"Could not read resume file. Error: {e}")
+            st.caption(
+                f"Active: **{st.session_state['resume_name']}**"
+                if st.session_state["resume_name"]
+                else "No active resume selected."
+            )
 
         extra_notes = st.text_area("Extra notes (optional)", height=100, placeholder="Anything to emphasize…")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -309,7 +413,6 @@ with tabs[0]:
         with st.expander("📌 Tracker fields (recommended)", expanded=True):
             autofill_clicked = st.button("✨ Auto-fill from job post")
 
-            # Determine autofill text
             autofill_source_text = job_desc.strip()
             if not autofill_source_text and job_url:
                 try:
@@ -321,7 +424,7 @@ with tabs[0]:
                 if not autofill_source_text:
                     st.warning("Paste a job description or provide a fetchable URL to auto-fill.")
                 else:
-                    with st.spinner("Extracting company / role / location…"):
+                    with st.spinner("Extracting company / (role) / location…"):
                         fields = extract_fields(autofill_source_text)
                     st.session_state["company_input"] = fields.get("company", "") or ""
                     st.session_state["role_input"] = fields.get("role", "") or ""
@@ -356,7 +459,7 @@ with tabs[0]:
         if run:
             resume_text = (st.session_state.get("resume_text") or "").strip()
             if not resume_text:
-                st.error("No resume stored. Upload a resume first (or don’t clear it).")
+                st.error("No active resume. Upload or select one from the library.")
                 st.stop()
 
             job_post_text = ""
@@ -364,7 +467,7 @@ with tabs[0]:
                 try:
                     job_post_text = fetch_job_post(job_url)
                 except Exception as e:
-                    st.warning(f"Could not fetch job URL (some sites block scraping). Paste description instead. Error: {e}")
+                    st.warning(f"Could not fetch job URL. Paste description instead. Error: {e}")
 
             if not job_post_text:
                 job_post_text = job_desc.strip()
@@ -373,7 +476,6 @@ with tabs[0]:
                 st.error("Provide a job URL that can be fetched OR paste the job description.")
                 st.stop()
 
-            # Auto-fill on generate if blank
             if (
                 not st.session_state["company_input"].strip()
                 or not st.session_state["role_input"].strip()
@@ -444,29 +546,25 @@ with tabs[0]:
                 except Exception as e:
                     st.error(f"Could not write to tracker DB. Error: {e}")
         else:
-            st.info("Fill job details, upload resume, then click Generate.")
-
+            st.info("Fill job details, choose a resume, then click Generate.")
 
 # -------------------------
 # TAB 2: TRACKER
 # -------------------------
 with tabs[1]:
     st.markdown(f"### 📌 Tracker — {user_id}")
-    st.caption("Edits are saved to your private SQLite tracker.")
+    st.caption("Edits are saved to Neon (Postgres).")
 
-    # Load tracker
     try:
         df = read_tracker_df(user_id)
     except Exception as e:
         st.error(f"Could not read tracker DB. Error: {e}")
         st.stop()
 
-    # Add job button at top
     topA, topB = st.columns([1, 3])
     with topA:
         if st.button("➕ Add job", type="primary", use_container_width=True):
             st.session_state["show_add_form"] = True
-
     with topB:
         if st.session_state.get("tracker_last_saved"):
             st.caption(f"Last saved: {st.session_state['tracker_last_saved']}")
@@ -531,29 +629,140 @@ with tabs[1]:
 
     df = ensure_row_ids(df)
 
+    # -------------------------
+    # Due / Overdue logic
+    # -------------------------
+    today = date.today()
+    df["_followup_dt"] = safe_date_parse(df.get("Follow-up Date", pd.Series([], dtype=str)))
+    df["_due_today"] = df["_followup_dt"].apply(lambda d: d == today if pd.notna(d) else False)
+
+    closed_statuses = {"Rejected", "Offer"}  # not flagged as overdue
+    df["_overdue"] = df.apply(
+        lambda r: (pd.notna(r["_followup_dt"]) and r["_followup_dt"] < today and str(r.get("Status", "")) not in closed_statuses),
+        axis=1,
+    )
+
+    due_today_count = int(df["_due_today"].sum())
+    overdue_count = int(df["_overdue"].sum())
+
+    # Banner
+    if overdue_count > 0:
+        st.markdown(
+            f"""
+            <div class="alert alert-danger">
+              <b>⚠️ Follow-ups overdue:</b> {overdue_count}
+              <div class="muted small">Open “Due & Overdue” below to view them.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif due_today_count > 0:
+        st.markdown(
+            f"""
+            <div class="alert alert-warn">
+              <b>⏰ Follow-ups due today:</b> {due_today_count}
+              <div class="muted small">Open “Due & Overdue” below to view them.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div class="alert alert-ok">
+              <b>✅ You're on track.</b>
+              <div class="muted small">No follow-ups due today or overdue.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     # Overview metrics
     st.markdown("#### 📊 Overview")
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total", len(df))
     m2.metric("Applied", int((df["Status"].astype(str) == "Applied").sum()))
     m3.metric("Interview", int((df["Status"].astype(str) == "Interview").sum()))
     m4.metric("Offers", int((df["Status"].astype(str) == "Offer").sum()))
+    m5.metric("Overdue", overdue_count)
 
-    # Next follow-ups
-    if "Follow-up Date" in df.columns:
-        up = df.copy()
-        up["Follow-up Date"] = up["Follow-up Date"].astype(str)
-        up = up[up["Follow-up Date"].str.strip() != ""]
-        up = up.sort_values("Follow-up Date", ascending=True).head(5)
-        with st.expander("⏰ Next follow-ups", expanded=False):
-            show_cols = [c for c in ["Company", "Role", "Status", "Follow-up Date"] if c in up.columns]
-            st.dataframe(up[show_cols], use_container_width=True, hide_index=True)
+    # -------------------------
+    # Charts
+    # -------------------------
+    st.markdown("#### 📈 Trends")
+
+    status_counts = df["Status"].fillna("").astype(str).replace("", "Unknown").value_counts().reset_index()
+    status_counts.columns = ["Status", "Count"]
+
+    st.altair_chart(
+        alt.Chart(status_counts)
+        .mark_bar()
+        .encode(x=alt.X("Status:N", sort="-y"), y="Count:Q", tooltip=["Status", "Count"]),
+        use_container_width=True,
+    )
+
+    tmp = df.copy()
+    tmp["Date Applied"] = pd.to_datetime(tmp["Date Applied"], errors="coerce")
+    tmp = tmp.dropna(subset=["Date Applied"])
+    if not tmp.empty:
+        daily = tmp.groupby(tmp["Date Applied"].dt.date).size().reset_index(name="Count")
+        daily.columns = ["Date", "Count"]
+        st.altair_chart(
+            alt.Chart(daily)
+            .mark_line(point=True)
+            .encode(x="Date:T", y="Count:Q", tooltip=["Date", "Count"]),
+            use_container_width=True,
+        )
+
+    # -------------------------
+    # Due & Overdue section
+    # -------------------------
+    with st.expander("📅 Due & Overdue", expanded=True):
+        colL, colR = st.columns(2)
+
+        with colL:
+            st.markdown("##### ⚠️ Overdue")
+            overdue_df = df[df["_overdue"]].copy().sort_values("_followup_dt", ascending=True)
+            if overdue_df.empty:
+                st.caption("None 🎉")
+            else:
+                for _, r in overdue_df.head(15).iterrows():
+                    st.markdown(
+                        f"""
+                        <div class="rowcard rowcard-danger">
+                          <div><b>{r.get('Company','')}</b> — {r.get('Role','')} {render_status_pill(r.get('Status',''))}</div>
+                          <div class="muted small">Follow-up date: <b>{r.get('Follow-up Date','')}</b></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+        with colR:
+            st.markdown("##### ⏰ Due today")
+            due_df = df[df["_due_today"]].copy().sort_values("_followup_dt", ascending=True)
+            if due_df.empty:
+                st.caption("None")
+            else:
+                for _, r in due_df.head(15).iterrows():
+                    st.markdown(
+                        f"""
+                        <div class="rowcard rowcard-warn">
+                          <div><b>{r.get('Company','')}</b> — {r.get('Role','')} {render_status_pill(r.get('Status',''))}</div>
+                          <div class="muted small">Follow-up date: <b>{r.get('Follow-up Date','')}</b></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+        st.caption("Tip: Offers/Rejected are not flagged as overdue.")
 
     st.divider()
 
+    # -------------------------
     # Filters
+    # -------------------------
     st.markdown("#### 🔎 Filter")
-    f1, f2, f3 = st.columns(3)
+    f1, f2, f3, f4 = st.columns(4)
     with f1:
         statuses = sorted([s for s in df["Status"].dropna().unique().tolist() if str(s).strip() != ""])
         status_filter = st.multiselect("Status", statuses)
@@ -561,6 +770,8 @@ with tabs[1]:
         company_search = st.text_input("Company contains")
     with f3:
         role_search = st.text_input("Role contains")
+    with f4:
+        followup_filter = st.selectbox("Follow-up", ["All", "Overdue only", "Due today only"], index=0)
 
     filtered = df.copy()
     if status_filter:
@@ -570,11 +781,18 @@ with tabs[1]:
     if role_search:
         filtered = filtered[filtered["Role"].astype(str).str.contains(role_search, case=False, na=False)]
 
-    # Editor
+    if followup_filter == "Overdue only":
+        filtered = filtered[filtered["_overdue"]]
+    elif followup_filter == "Due today only":
+        filtered = filtered[filtered["_due_today"]]
+
+    # -------------------------
+    # Editable table
+    # -------------------------
     st.markdown("#### 🧾 Tracker table")
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
-    editor_df = filtered.copy()
+    editor_df = filtered.drop(columns=["_followup_dt", "_due_today", "_overdue"], errors="ignore").copy()
     if "Delete" not in editor_df.columns:
         editor_df["Delete"] = False
 
@@ -591,6 +809,13 @@ with tabs[1]:
                 "Delete",
                 help="Tick and click Save changes to remove the row.",
                 default=False,
+            ),
+            "Job Link": st.column_config.LinkColumn("Job Link"),
+            "Contact Link": st.column_config.LinkColumn("Contact Link"),
+            "Status": st.column_config.SelectboxColumn(
+                "Status",
+                options=["Interested", "Applied", "OA", "Interview", "Offer", "Rejected", "Ghosted"],
+                required=False,
             ),
         },
         key="tracker_editor",
@@ -621,11 +846,11 @@ with tabs[1]:
             st.rerun()
 
     with c:
-        st.caption("Tip: Use Delete checkboxes for quick removals. All edits save to your private tracker.")
+        st.caption("Tip: Use filters above to find overdue/due items quickly.")
 
-    # Downloads (exclude _row_id)
+    # Downloads
     st.divider()
-    download_df = filtered.drop(columns=["_row_id"], errors="ignore")
+    download_df = filtered.drop(columns=["_row_id", "_followup_dt", "_due_today", "_overdue"], errors="ignore")
     d1, d2 = st.columns(2)
     with d1:
         st.download_button(
@@ -644,9 +869,8 @@ with tabs[1]:
             use_container_width=True,
         )
 
-    st.divider()
-
     # Import
+    st.divider()
     st.markdown("#### 📥 Import")
     upload = st.file_uploader("Upload CSV", type=["csv"], key="tracker_upload")
     mode = st.radio("Import mode", ["Merge into tracker", "Replace tracker"], horizontal=True)

@@ -1,9 +1,13 @@
 import re
 import bcrypt
+
 from db import get_conn
 
 
 def init_auth() -> None:
+    """
+    Users table for auth + preferences (email reminders).
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -11,7 +15,9 @@ def init_auth() -> None:
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
                     password_hash BYTEA NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    email TEXT,
+                    notify_opt_in BOOLEAN NOT NULL DEFAULT FALSE
                 );
                 """
             )
@@ -82,7 +88,7 @@ def verify_user(user_id: str, password: str) -> bool:
         return False
 
     stored = row[0]
-    # psycopg2 returns BYTEA as memoryview sometimes
+    # psycopg2 can return BYTEA as memoryview
     if isinstance(stored, memoryview):
         stored = stored.tobytes()
 
@@ -119,3 +125,38 @@ def delete_user(user_id: str, current_password: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
         conn.commit()
+
+
+def update_email_prefs(user_id: str, email: str, opt_in: bool) -> None:
+    """
+    Save reminder email preferences.
+    """
+    init_auth()
+    user_id = (user_id or "").strip()
+    email = (email or "").strip()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET email = %s, notify_opt_in = %s WHERE user_id = %s",
+                (email if email else None, bool(opt_in), user_id),
+            )
+        conn.commit()
+
+
+def get_email_prefs(user_id: str) -> dict:
+    """
+    Returns {"email": str|None, "notify_opt_in": bool}
+    """
+    init_auth()
+    user_id = (user_id or "").strip()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT email, notify_opt_in FROM users WHERE user_id = %s LIMIT 1",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return {"email": None, "notify_opt_in": False}
+    return {"email": row[0], "notify_opt_in": bool(row[1])}
