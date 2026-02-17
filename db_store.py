@@ -1,27 +1,9 @@
-# db_store.py
-import sqlite3
 import uuid
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import pandas as pd
 
-DB_PATH = Path("tracker.db")
-
-COLUMNS = [
-    "_row_id",
-    "user_id",
-    "Date Applied",
-    "Company",
-    "Role",
-    "Job Link",
-    "Location",
-    "Status",
-    "Follow-up Date",
-    "Contact Name",
-    "Contact Link",
-    "Notes",
-]
+from db import get_conn
 
 TEXT_COLS = [
     "Date Applied",
@@ -37,51 +19,59 @@ TEXT_COLS = [
 ]
 
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
-
-
 def init_db() -> None:
-    conn = get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS applications (
-            _row_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            "Date Applied" TEXT,
-            "Company" TEXT,
-            "Role" TEXT,
-            "Job Link" TEXT,
-            "Location" TEXT,
-            "Status" TEXT,
-            "Follow-up Date" TEXT,
-            "Contact Name" TEXT,
-            "Contact Link" TEXT,
-            "Notes" TEXT
-        );
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON applications(user_id);")
-    conn.commit()
-    conn.close()
+    """
+    Creates the applications table (and a safe users table if it doesn't exist).
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Users table (auth.py also creates it, but this avoids admin queries failing)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    password_hash BYTEA NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            # Applications table
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS applications (
+                    _row_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    "Date Applied" TEXT,
+                    "Company" TEXT,
+                    "Role" TEXT,
+                    "Job Link" TEXT,
+                    "Location" TEXT,
+                    "Status" TEXT,
+                    "Follow-up Date" TEXT,
+                    "Contact Name" TEXT,
+                    "Contact Link" TEXT,
+                    "Notes" TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON applications(user_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON applications(created_at);")
+        conn.commit()
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Ensure all expected columns exist
     for c in TEXT_COLS:
         if c not in df.columns:
             df[c] = ""
 
-    # Normalize types to strings (prevents streamlit editor dtype issues)
     for c in TEXT_COLS:
         df[c] = df[c].fillna("").astype(str)
 
-    # Keep only known columns (excluding user_id/_row_id which are handled separately)
     keep = ["_row_id"] + TEXT_COLS
     for c in keep:
         if c not in df.columns:
@@ -103,20 +93,23 @@ def ensure_row_ids(df: pd.DataFrame) -> pd.DataFrame:
 
 def read_tracker_df(user_id: str) -> pd.DataFrame:
     init_db()
-    conn = get_conn()
-    cur = conn.execute(
-        'SELECT _row_id, "Date Applied","Company","Role","Job Link","Location","Status","Follow-up Date","Contact Name","Contact Link","Notes" '
-        "FROM applications WHERE user_id = ? ORDER BY rowid DESC",
-        (user_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
 
-    if not rows:
+    query = """
+        SELECT
+            _row_id,
+            "Date Applied","Company","Role","Job Link","Location","Status",
+            "Follow-up Date","Contact Name","Contact Link","Notes"
+        FROM applications
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+    """
+
+    with get_conn() as conn:
+        df = pd.read_sql_query(query, conn, params=(user_id,))
+
+    if df.empty:
         return pd.DataFrame(columns=["_row_id"] + TEXT_COLS)
 
-    cols = ["_row_id"] + TEXT_COLS
-    df = pd.DataFrame(rows, columns=cols)
     df = _normalize_df(df)
     df = ensure_row_ids(df)
     return df
@@ -125,90 +118,86 @@ def read_tracker_df(user_id: str) -> pd.DataFrame:
 def append_row(user_id: str, row: Dict) -> None:
     init_db()
     row_id = str(uuid.uuid4())
-
-    # normalize
     values = {c: str(row.get(c, "") or "") for c in TEXT_COLS}
 
-    conn = get_conn()
-    conn.execute(
-        """
+    sql = """
         INSERT INTO applications (
-            _row_id, user_id, "Date Applied","Company","Role","Job Link","Location","Status",
+            _row_id, user_id,
+            "Date Applied","Company","Role","Job Link","Location","Status",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            row_id,
-            user_id,
-            values["Date Applied"],
-            values["Company"],
-            values["Role"],
-            values["Job Link"],
-            values["Location"],
-            values["Status"],
-            values["Follow-up Date"],
-            values["Contact Name"],
-            values["Contact Link"],
-            values["Notes"],
-        ),
-    )
-    conn.commit()
-    conn.close()
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    row_id,
+                    user_id,
+                    values["Date Applied"],
+                    values["Company"],
+                    values["Role"],
+                    values["Job Link"],
+                    values["Location"],
+                    values["Status"],
+                    values["Follow-up Date"],
+                    values["Contact Name"],
+                    values["Contact Link"],
+                    values["Notes"],
+                ),
+            )
+        conn.commit()
 
 
 def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
-    """
-    Replace the user's entire tracker with the rows in df.
-    df must contain _row_id + TEXT_COLS.
-    """
     init_db()
     df = ensure_row_ids(_normalize_df(df))
 
-    conn = get_conn()
-    conn.execute("DELETE FROM applications WHERE user_id = ?", (user_id,))
-
     insert_sql = """
         INSERT INTO applications (
-            _row_id, user_id, "Date Applied","Company","Role","Job Link","Location","Status",
+            _row_id, user_id,
+            "Date Applied","Company","Role","Job Link","Location","Status",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
-    data = []
-    for _, r in df.iterrows():
-        data.append(
-            (
-                str(r["_row_id"]),
-                user_id,
-                str(r["Date Applied"] or ""),
-                str(r["Company"] or ""),
-                str(r["Role"] or ""),
-                str(r["Job Link"] or ""),
-                str(r["Location"] or ""),
-                str(r["Status"] or ""),
-                str(r["Follow-up Date"] or ""),
-                str(r["Contact Name"] or ""),
-                str(r["Contact Link"] or ""),
-                str(r["Notes"] or ""),
-            )
-        )
 
-    conn.executemany(insert_sql, data)
-    conn.commit()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM applications WHERE user_id = %s", (user_id,))
+
+            data = []
+            for _, r in df.iterrows():
+                data.append(
+                    (
+                        str(r["_row_id"]),
+                        user_id,
+                        str(r["Date Applied"] or ""),
+                        str(r["Company"] or ""),
+                        str(r["Role"] or ""),
+                        str(r["Job Link"] or ""),
+                        str(r["Location"] or ""),
+                        str(r["Status"] or ""),
+                        str(r["Follow-up Date"] or ""),
+                        str(r["Contact Name"] or ""),
+                        str(r["Contact Link"] or ""),
+                        str(r["Notes"] or ""),
+                    )
+                )
+
+            cur.executemany(insert_sql, data)
+
+        conn.commit()
 
 
-def merge_uploaded_csv(
-    user_id: str, uploaded_df: pd.DataFrame, dedupe: bool = True
-) -> None:
+def merge_uploaded_csv(user_id: str, uploaded_df: pd.DataFrame, dedupe: bool = True) -> None:
     existing = read_tracker_df(user_id)
     uploaded_df = ensure_row_ids(_normalize_df(uploaded_df))
-
     combined = pd.concat([existing, uploaded_df], ignore_index=True)
 
     if dedupe:
-        # de-dupe by these fields (same as your UI)
         key_cols = ["Company", "Role", "Job Link", "Date Applied"]
         for c in key_cols:
             if c not in combined.columns:
@@ -222,32 +211,30 @@ def replace_with_uploaded_csv(user_id: str, uploaded_df: pd.DataFrame) -> None:
     uploaded_df = ensure_row_ids(_normalize_df(uploaded_df))
     overwrite_tracker_for_user(user_id, uploaded_df)
 
+
 def delete_all_for_user(user_id: str) -> None:
     init_db()
-    conn = get_conn()
-    conn.execute("DELETE FROM applications WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM applications WHERE user_id = %s", (user_id,))
+        conn.commit()
 
 
 def admin_list_users() -> pd.DataFrame:
     init_db()
-    conn = get_conn()
-    # users table is created by auth.py, but this query is safe if it exists
-    try:
-        df = pd.read_sql_query(
-            """
-            SELECT u.user_id,
-                   u.created_at,
-                   COUNT(a._row_id) AS jobs_count
-            FROM users u
-            LEFT JOIN applications a ON a.user_id = u.user_id
-            GROUP BY u.user_id, u.created_at
-            ORDER BY jobs_count DESC, u.user_id ASC
-            """,
-            conn,
-        )
-    except Exception:
-        df = pd.DataFrame(columns=["user_id", "created_at", "jobs_count"])
-    conn.close()
-    return df
+    query = """
+        SELECT
+            u.user_id,
+            u.created_at,
+            COUNT(a._row_id) AS jobs_count
+        FROM users u
+        LEFT JOIN applications a ON a.user_id = u.user_id
+        GROUP BY u.user_id, u.created_at
+        ORDER BY jobs_count DESC, u.user_id ASC
+    """
+
+    with get_conn() as conn:
+        try:
+            return pd.read_sql_query(query, conn)
+        except Exception:
+            return pd.DataFrame(columns=["user_id", "created_at", "jobs_count"])

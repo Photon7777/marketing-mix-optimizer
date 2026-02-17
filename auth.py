@@ -1,33 +1,21 @@
-# auth.py
 import re
-import sqlite3
-from pathlib import Path
-
 import bcrypt
-
-DB_PATH = Path("tracker.db")
-
-
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+from db import get_conn
 
 
 def init_auth() -> None:
-    conn = get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            password_hash BLOB NOT NULL,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    password_hash BYTEA NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+        conn.commit()
 
 
 def validate_username(user_id: str) -> None:
@@ -49,11 +37,11 @@ def validate_password(password: str) -> None:
 
 def user_exists(user_id: str) -> bool:
     init_auth()
-    conn = get_conn()
-    cur = conn.execute("SELECT 1 FROM users WHERE user_id = ? LIMIT 1", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row is not None
+    user_id = (user_id or "").strip()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE user_id = %s LIMIT 1", (user_id,))
+            return cur.fetchone() is not None
 
 
 def create_user(user_id: str, password: str) -> None:
@@ -67,13 +55,13 @@ def create_user(user_id: str, password: str) -> None:
 
     pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
 
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO users (user_id, password_hash) VALUES (?, ?)",
-        (user_id, pw_hash),
-    )
-    conn.commit()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (user_id, password_hash) VALUES (%s, %s)",
+                (user_id, pw_hash),
+            )
+        conn.commit()
 
 
 def verify_user(user_id: str, password: str) -> bool:
@@ -82,41 +70,52 @@ def verify_user(user_id: str, password: str) -> bool:
     if not user_id or not password:
         return False
 
-    conn = get_conn()
-    cur = conn.execute(
-        "SELECT password_hash FROM users WHERE user_id = ? LIMIT 1",
-        (user_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT password_hash FROM users WHERE user_id = %s LIMIT 1",
+                (user_id,),
+            )
+            row = cur.fetchone()
 
     if not row:
         return False
 
-    stored_hash = row[0]
-    return bcrypt.checkpw(password.encode("utf-8"), stored_hash)
+    stored = row[0]
+    # psycopg2 returns BYTEA as memoryview sometimes
+    if isinstance(stored, memoryview):
+        stored = stored.tobytes()
+
+    return bcrypt.checkpw(password.encode("utf-8"), stored)
+
 
 def change_password(user_id: str, current_password: str, new_password: str) -> None:
     init_auth()
     user_id = (user_id or "").strip()
+
     if not verify_user(user_id, current_password):
         raise ValueError("Current password is incorrect.")
-    validate_password(new_password)
 
+    validate_password(new_password)
     pw_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt())
-    conn = get_conn()
-    conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (pw_hash, user_id))
-    conn.commit()
-    conn.close()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET password_hash = %s WHERE user_id = %s",
+                (pw_hash, user_id),
+            )
+        conn.commit()
 
 
 def delete_user(user_id: str, current_password: str) -> None:
     init_auth()
     user_id = (user_id or "").strip()
+
     if not verify_user(user_id, current_password):
         raise ValueError("Password is incorrect.")
 
-    conn = get_conn()
-    conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
+        conn.commit()
