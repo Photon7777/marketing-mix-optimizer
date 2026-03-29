@@ -14,6 +14,9 @@ TEXT_COLS = [
     "Job Link",
     "Location",
     "Status",
+    "Fit Score",
+    "Priority",
+    "Fit Summary",
     "Follow-up Date",
     "Contact Name",
     "Contact Link",
@@ -40,6 +43,9 @@ def init_db() -> None:
                     "Job Link" TEXT,
                     "Location" TEXT,
                     "Status" TEXT,
+                    "Fit Score" TEXT,
+                    "Priority" TEXT,
+                    "Fit Summary" TEXT,
                     "Follow-up Date" TEXT,
                     "Contact Name" TEXT,
                     "Contact Link" TEXT,
@@ -50,6 +56,11 @@ def init_db() -> None:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_app_user_id ON applications(user_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_app_created_at ON applications(created_at);")
+
+            # Safe migrations for older DBs
+            cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Fit Score" TEXT;')
+            cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Priority" TEXT;')
+            cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Fit Summary" TEXT;')
 
             # Resume versions library
             cur.execute(
@@ -111,6 +122,7 @@ def read_tracker_df(user_id: str) -> pd.DataFrame:
         SELECT
             _row_id,
             "Date Applied","Company","Role","Job Link","Location","Status",
+            "Fit Score","Priority","Fit Summary",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         FROM applications
         WHERE user_id = %s
@@ -137,9 +149,10 @@ def append_row(user_id: str, row: Dict) -> None:
         INSERT INTO applications (
             _row_id, user_id,
             "Date Applied","Company","Role","Job Link","Location","Status",
+            "Fit Score","Priority","Fit Summary",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     with get_conn() as conn:
@@ -155,6 +168,9 @@ def append_row(user_id: str, row: Dict) -> None:
                     values["Job Link"],
                     values["Location"],
                     values["Status"],
+                    values["Fit Score"],
+                    values["Priority"],
+                    values["Fit Summary"],
                     values["Follow-up Date"],
                     values["Contact Name"],
                     values["Contact Link"],
@@ -176,9 +192,10 @@ def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
         INSERT INTO applications (
             _row_id, user_id,
             "Date Applied","Company","Role","Job Link","Location","Status",
+            "Fit Score","Priority","Fit Summary",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     with get_conn() as conn:
@@ -197,6 +214,9 @@ def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
                         str(r["Job Link"] or ""),
                         str(r["Location"] or ""),
                         str(r["Status"] or ""),
+                        str(r["Fit Score"] or ""),
+                        str(r["Priority"] or ""),
+                        str(r["Fit Summary"] or ""),
                         str(r["Follow-up Date"] or ""),
                         str(r["Contact Name"] or ""),
                         str(r["Contact Link"] or ""),
@@ -204,7 +224,8 @@ def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
                     )
                 )
 
-            cur.executemany(insert_sql, data)
+            if data:
+                cur.executemany(insert_sql, data)
 
         conn.commit()
 
@@ -316,6 +337,21 @@ def load_resume_text(user_id: str, resume_id: str) -> str:
     if not row:
         raise ValueError("Resume not found.")
     return row[0]
+
+
+def list_resume_payloads(user_id: str) -> list[dict]:
+    init_db()
+    query = """
+        SELECT resume_id, name, resume_text, created_at
+        FROM resumes
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+    """
+    with get_conn() as conn:
+        df = pd.read_sql_query(query, conn, params=(user_id,))
+    if df.empty:
+        return []
+    return df.fillna("").to_dict(orient="records")
 
 
 def delete_resume_version(user_id: str, resume_id: str) -> None:
