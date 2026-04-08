@@ -4,7 +4,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=_OPENAI_API_KEY) if _OPENAI_API_KEY else None
+AUTOFILL_MODEL = os.getenv("OPENAI_AUTOFILL_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 AUTOFILL_SYSTEM = """Extract tracker fields from a job post.
 Return ONLY valid JSON with these exact keys:
@@ -16,8 +18,11 @@ Rules:
 """
 
 def extract_fields(job_post_text: str) -> dict:
+    if client is None:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=AUTOFILL_MODEL,
         messages=[
             {"role": "system", "content": AUTOFILL_SYSTEM},
             {"role": "user", "content": job_post_text[:20000]},

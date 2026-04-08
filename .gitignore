@@ -9,13 +9,24 @@ build/
 .venv/
 venv/
 .env
+.env.*
 
 # Streamlit
 .streamlit/secrets.toml
 
+# Local OAuth / API credentials
+gmail_token.json
+*token*.json
+client_secret*.json
+*_secret*.json
+credentials*.json
+
 # Local databases / data
 tracker.db
+tracker.csv
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 

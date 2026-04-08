@@ -1,184 +1,99 @@
-🧠 Internship Application Agent
+# NextRole
 
-Generate tailored internship application materials and maintain a private job tracker — per user.
+AI-powered career operations app for internship and early-career job search workflows.
 
-Built with Streamlit + SQLite + bcrypt authentication.
+NextRole helps users choose the best resume version, analyze fit against a job post, generate tailored application materials, manage a private application tracker, and run recruiter outreach campaigns.
 
-🚀 Features
-🧾 Application Pack Generator
+## Features
 
-Upload resume (PDF or TXT)
+- Secure login, signup, password change, and account deletion with bcrypt hashing.
+- Per-user Postgres tracker for applications, statuses, priorities, fit scores, follow-ups, contacts, notes, and resume used.
+- Resume library with extracted text plus original file storage for email attachments.
+- Job fit scoring and resume-version recommendations.
+- AI-generated application pack with role summary, gaps, tailored resume bullets, cover letter paragraph, networking message, and interview talking points.
+- Cold outreach workflows for individual contacts, bulk campaigns, role-based web company discovery, startup/open-role discovery, and explicit daily discovery runs.
+- Company-specific outreach drafting so each recipient can receive a niche message based on company context, recipient title, role target, and resume highlights.
+- Sponsorship signal columns with conservative historical H-1B sponsor lookup hints; users should verify current role-level sponsorship before applying.
+- Gmail sending with optional resume attachment.
+- Hunter contact discovery with local contact ranking.
+- CSV and Excel export, CSV import, de-duplication, inline editing, and admin read-only overview.
+- Pipeline insights for active pipeline, interview/offer rate, follow-up pressure, and resume usage.
 
-Paste job description or job URL
+## Project Structure
 
-AI-generated tailored application materials
-
-Download as .txt or .docx
-
-Optional auto-logging into tracker
-
-📌 Private Job Tracker (Per User)
-
-Secure login & signup
-
-Independent tracker for every user
-
-Add / edit / delete jobs inline
-
-Status filters + search
-
-Overview metrics (Applied, Interviews, Offers)
-
-Upcoming follow-ups panel
-
-CSV + Excel export
-
-CSV import (merge or replace)
-
-De-duplication logic
-
-🔐 Authentication System
-
-Secure password hashing with bcrypt
-
-Change password
-
-Delete account (wipes tracker)
-
-SQLite storage
-
-🛡️ Admin Panel
-
-Admin users (configured via secrets.toml) can:
-
-View all registered users
-
-See job counts
-
-View any user's tracker (read-only)
-
-🏗️ Project Structure
+```text
 .
-├── app.py              # Main Streamlit UI
-├── auth.py             # Authentication logic (bcrypt + users table)
-├── db_store.py         # Tracker database logic (SQLite)
-├── agent.py            # AI application pack generation
-├── autofill.py         # Extract company/role/location from job post
-├── tools.py            # Helper utilities
-├── tracker.db          # SQLite database (auto-created, NOT committed)
-├── .streamlit/
-│   └── secrets.toml    # Admin config (NOT committed)
-└── README.md
-⚙️ Local Setup
-1️⃣ Clone the repo
-git clone https://github.com/YOUR_USERNAME/internship-agent.git
-cd internship-agent
-2️⃣ Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Mac/Linux
-venv\Scripts\activate     # Windows
-3️⃣ Install dependencies
+|-- app.py              # Main Streamlit UI
+|-- agent.py            # OpenAI application-pack generation
+|-- auth.py             # Authentication and user profile preferences
+|-- autofill.py         # Job field extraction
+|-- db.py               # Postgres connection helper
+|-- db_store.py         # Tracker and resume persistence
+|-- gmail_sender.py     # Gmail API sender
+|-- hunter_helper.py    # Hunter API client and contact ranking
+|-- tools.py            # Fit scoring, job fetch, resume ranking helpers
+|-- requirements.txt
+`-- tests/
+```
+
+## Local Setup
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
+```
 
-If you don't have a requirements.txt, generate one:
+Create `.env` locally or configure Streamlit secrets with the required values:
 
-pip freeze > requirements.txt
-4️⃣ Configure Admin Users (Optional)
+```bash
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_OUTREACH_MODEL=gpt-4o-mini
+DATABASE_URL=postgresql://...
+HUNTER_API_KEY=...
+GMAIL_SENDER_EMAIL=you@example.com
+GMAIL_CLIENT_SECRET_FILE=/absolute/path/to/client_secret.json
+GMAIL_TOKEN_FILE=/absolute/path/to/gmail_token.json
+```
 
-Create:
+Optional Streamlit secrets:
 
-.streamlit/secrets.toml
-
-Add:
-
+```toml
 admin_users = ["your_username"]
+DATABASE_URL = "postgresql://..."
+```
 
-⚠️ Do NOT commit this file. It is ignored via .gitignore.
+Run the app:
 
-5️⃣ Run the App
+```bash
 streamlit run app.py
+```
 
-App runs at:
+## Deployment Notes
 
-http://localhost:8501
-🗄️ Database
+- Use Postgres-compatible storage such as Neon, Render Postgres, Railway Postgres, or Supabase Postgres.
+- Store `DATABASE_URL`, `OPENAI_API_KEY`, `HUNTER_API_KEY`, and Gmail settings in deployment secrets.
+- Do not commit `.env`, Streamlit secrets, Gmail tokens, Google client-secret JSON files, local DB files, or runtime tracker artifacts.
+- Gmail OAuth token generation may require a local browser flow; for hosted deployments, pre-provision a token securely or replace the sender with a hosted email provider flow.
 
-SQLite file: tracker.db
+## Verification
 
-Auto-created on first run
+Run a syntax check:
 
-Contains:
+```bash
+venv/bin/python -m py_compile app.py agent.py auth.py autofill.py db.py db_store.py tools.py gmail_sender.py hunter_helper.py
+```
 
-users table
+Run unit tests:
 
-applications table
+```bash
+venv/bin/python -m unittest discover -s tests
+```
 
-Each tracker row is scoped to user_id.
+## Security Notes
 
-🔐 Security Notes
-
-Passwords are hashed with bcrypt
-
-Each user has isolated tracker data
-
-Admin access controlled via secrets.toml
-
-tracker.db and secrets.toml are excluded from Git
-
-🌍 Deployment Options
-
-Recommended platforms:
-
-Streamlit Community Cloud
-
-Render
-
-Railway
-
-Fly.io
-
-Make sure environment includes:
-
-Python 3.9+
-
-SQLite support
-
-bcrypt
-
-streamlit
-
-📊 Tech Stack
-
-Python
-
-Streamlit
-
-SQLite
-
-Pandas
-
-bcrypt
-
-OpenPyXL
-
-python-docx
-
-PyPDF
-
-🧩 Future Improvements
-
-OAuth (Google login)
-
-Email verification
-
-Multi-role admin permissions
-
-Interview analytics dashboard
-
-Cloud-hosted database (Postgres)
-
-👤 Author
-
-Built by Sai Praneeth Kathi Moksha Gnana
-MS Information Systems — University of Maryland
-Aspiring Data / Analytics Engineer
+- Passwords are hashed with bcrypt.
+- Tracker and resume data is scoped by `user_id`.
+- Destructive account deletion verifies the password before wiping tracker/resume data.
+- OAuth/client-secret files are ignored by Git; rotate credentials if they were ever exposed.

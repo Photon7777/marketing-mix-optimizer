@@ -1,6 +1,6 @@
 # db_store.py
 import uuid
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -17,6 +17,7 @@ TEXT_COLS = [
     "Fit Score",
     "Priority",
     "Fit Summary",
+    "Resume Used",
     "Follow-up Date",
     "Contact Name",
     "Contact Link",
@@ -46,6 +47,7 @@ def init_db() -> None:
                     "Fit Score" TEXT,
                     "Priority" TEXT,
                     "Fit Summary" TEXT,
+                    "Resume Used" TEXT,
                     "Follow-up Date" TEXT,
                     "Contact Name" TEXT,
                     "Contact Link" TEXT,
@@ -61,6 +63,7 @@ def init_db() -> None:
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Fit Score" TEXT;')
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Priority" TEXT;')
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Fit Summary" TEXT;')
+            cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Resume Used" TEXT;')
 
             # Resume versions library
             cur.execute(
@@ -70,12 +73,20 @@ def init_db() -> None:
                     user_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     resume_text TEXT NOT NULL,
+                    file_name TEXT,
+                    file_bytes BYTEA,
+                    mime_type TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 """
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_res_user_id ON resumes(user_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_res_created_at ON resumes(created_at);")
+
+            # Safe migrations for older resume libraries.
+            cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS file_name TEXT;")
+            cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS file_bytes BYTEA;")
+            cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS mime_type TEXT;")
 
         conn.commit()
 
@@ -122,7 +133,7 @@ def read_tracker_df(user_id: str) -> pd.DataFrame:
         SELECT
             _row_id,
             "Date Applied","Company","Role","Job Link","Location","Status",
-            "Fit Score","Priority","Fit Summary",
+            "Fit Score","Priority","Fit Summary","Resume Used",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         FROM applications
         WHERE user_id = %s
@@ -149,10 +160,10 @@ def append_row(user_id: str, row: Dict) -> None:
         INSERT INTO applications (
             _row_id, user_id,
             "Date Applied","Company","Role","Job Link","Location","Status",
-            "Fit Score","Priority","Fit Summary",
+            "Fit Score","Priority","Fit Summary","Resume Used",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     with get_conn() as conn:
@@ -171,6 +182,7 @@ def append_row(user_id: str, row: Dict) -> None:
                     values["Fit Score"],
                     values["Priority"],
                     values["Fit Summary"],
+                    values["Resume Used"],
                     values["Follow-up Date"],
                     values["Contact Name"],
                     values["Contact Link"],
@@ -192,10 +204,10 @@ def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
         INSERT INTO applications (
             _row_id, user_id,
             "Date Applied","Company","Role","Job Link","Location","Status",
-            "Fit Score","Priority","Fit Summary",
+            "Fit Score","Priority","Fit Summary","Resume Used",
             "Follow-up Date","Contact Name","Contact Link","Notes"
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     with get_conn() as conn:
@@ -217,6 +229,7 @@ def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
                         str(r["Fit Score"] or ""),
                         str(r["Priority"] or ""),
                         str(r["Fit Summary"] or ""),
+                        str(r["Resume Used"] or ""),
                         str(r["Follow-up Date"] or ""),
                         str(r["Contact Name"] or ""),
                         str(r["Contact Link"] or ""),
@@ -248,6 +261,31 @@ def merge_uploaded_csv(user_id: str, uploaded_df: pd.DataFrame, dedupe: bool = T
 def replace_with_uploaded_csv(user_id: str, uploaded_df: pd.DataFrame) -> None:
     uploaded_df = ensure_row_ids(_normalize_df(uploaded_df))
     overwrite_tracker_for_user(user_id, uploaded_df)
+
+
+def merge_visible_tracker_edits(
+    original_df: pd.DataFrame,
+    edited_visible_df: pd.DataFrame,
+    visible_row_ids: set,
+) -> pd.DataFrame:
+    """
+    Merge edits from a filtered table back into the full tracker without dropping
+    rows hidden by the active filters.
+    """
+    original = original_df.drop(
+        columns=["_followup_dt", "_due_today", "_overdue", "Next Action"],
+        errors="ignore",
+    ).copy()
+    visible_ids = {str(row_id) for row_id in visible_row_ids if str(row_id).strip()}
+    hidden_rows = original[~original["_row_id"].fillna("").astype(str).isin(visible_ids)]
+
+    edited = edited_visible_df.copy()
+    edited = edited.drop(columns=["Next Action"], errors="ignore")
+    if "Delete" in edited.columns:
+        edited = edited[edited["Delete"] != True].copy()
+        edited = edited.drop(columns=["Delete"], errors="ignore")
+
+    return pd.concat([hidden_rows, edited], ignore_index=True)
 
 
 def delete_all_for_user(user_id: str) -> None:
@@ -289,23 +327,43 @@ def admin_list_users() -> pd.DataFrame:
 # -------------------------
 # RESUME LIBRARY FUNCTIONS
 # -------------------------
-def save_resume_version(user_id: str, name: str, resume_text: str) -> None:
+def _bytes_from_db(value) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    if isinstance(value, bytes):
+        return value
+    return bytes(value)
+
+
+def save_resume_version(
+    user_id: str,
+    name: str,
+    resume_text: str,
+    file_name: str = "",
+    file_bytes: Optional[bytes] = None,
+    mime_type: str = "",
+) -> None:
     init_db()
     resume_id = str(uuid.uuid4())
     name = (name or "").strip() or "Resume"
     resume_text = (resume_text or "").strip()
+    file_name = (file_name or name).strip()
+    mime_type = (mime_type or "").strip()
+    db_file_bytes = bytes(file_bytes) if file_bytes else None
 
     if not resume_text:
         raise ValueError("Resume text is empty.")
 
     sql = """
-        INSERT INTO resumes (resume_id, user_id, name, resume_text)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO resumes (resume_id, user_id, name, resume_text, file_name, file_bytes, mime_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
     """
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (resume_id, user_id, name, resume_text))
+            cur.execute(sql, (resume_id, user_id, name, resume_text, file_name, db_file_bytes, mime_type))
         conn.commit()
 
 
@@ -339,10 +397,34 @@ def load_resume_text(user_id: str, resume_id: str) -> str:
     return row[0]
 
 
+def load_resume_payload(user_id: str, resume_id: str) -> dict:
+    init_db()
+    sql = """
+        SELECT resume_id, name, resume_text, file_name, file_bytes, mime_type
+        FROM resumes
+        WHERE user_id = %s AND resume_id = %s
+        LIMIT 1
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id, resume_id))
+            row = cur.fetchone()
+    if not row:
+        raise ValueError("Resume not found.")
+    return {
+        "resume_id": row[0],
+        "name": row[1],
+        "resume_text": row[2] or "",
+        "file_name": row[3] or row[1] or "resume.pdf",
+        "file_bytes": _bytes_from_db(row[4]),
+        "mime_type": row[5] or "",
+    }
+
+
 def list_resume_payloads(user_id: str) -> list[dict]:
     init_db()
     query = """
-        SELECT resume_id, name, resume_text, created_at
+        SELECT resume_id, name, resume_text, file_name, mime_type, created_at
         FROM resumes
         WHERE user_id = %s
         ORDER BY created_at DESC
