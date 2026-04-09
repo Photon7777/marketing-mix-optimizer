@@ -6,10 +6,13 @@ import pandas as pd
 from auth import validate_password, validate_username
 from agent import _parse_json_object
 from company_discovery import (
+    build_muse_candidate,
     clean_company_name,
     company_from_search_result,
     discovery_score,
+    role_family_for_role,
     role_company_queries,
+    role_search_terms,
     role_specific_fallbacks,
     role_specific_startup_fallbacks,
     source_label_from_url,
@@ -18,6 +21,14 @@ from company_discovery import (
 from db_store import merge_visible_tracker_edits
 from gmail_sender import GmailSender
 from hunter_helper import HunterClient
+from outreach_guardrails import (
+    build_outreach_tracker_row,
+    contact_identity_keys,
+    filter_new_contacts,
+    normalize_outreach_email,
+    tracker_outreach_history,
+    unique_send_rows,
+)
 from tools import recommend_follow_up_action
 
 
@@ -94,6 +105,14 @@ class OutreachHelperTests(unittest.TestCase):
     def test_role_specific_startup_fallbacks_use_role_keywords(self):
         self.assertIn("Fivetran", role_specific_startup_fallbacks("Data Engineering Intern"))
 
+    def test_role_family_maps_related_titles(self):
+        self.assertEqual(role_family_for_role("Analytics Engineer Intern"), "data_engineering")
+
+    def test_role_search_terms_expand_role_family(self):
+        terms = role_search_terms("Data Engineering Intern", limit=4)
+
+        self.assertIn("analytics engineer", [term.lower() for term in terms])
+
     def test_sponsorship_signal_marks_known_sponsor(self):
         signal = sponsorship_signal_for_company("Databricks")
 
@@ -126,6 +145,28 @@ class OutreachHelperTests(unittest.TestCase):
 
         self.assertGreater(score, 20)
 
+    def test_build_muse_candidate_uses_matching_job(self):
+        job = {
+            "name": "Data Engineer Intern",
+            "contents": "<p>Work on ETL pipelines, warehouse models, and analytics infrastructure.</p>",
+            "publication_date": "2026-04-08T00:00:00Z",
+            "refs": {"landing_page": "https://www.themuse.com/jobs/example/data-engineer-intern"},
+            "company": {"name": "Example AI", "id": 10},
+            "categories": [{"name": "Data and Analytics"}],
+            "locations": [{"name": "Remote"}],
+        }
+        company_profile = {
+            "name": "Example AI",
+            "refs": {"landing_page": "https://www.example.ai"},
+            "industries": [{"name": "Internet and Software"}],
+        }
+
+        candidate = build_muse_candidate(job, company_profile, "Data Engineering Intern", "2026-04-08")
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.company, "Example AI")
+        self.assertEqual(candidate.source, "the-muse-open-role")
+
     def test_outreach_json_parser_handles_wrapped_json(self):
         parsed = _parse_json_object('draft:\n{"subject": "Hi", "body": "Body", "followup": "Later"}')
 
@@ -154,6 +195,76 @@ class OutreachHelperTests(unittest.TestCase):
             recommend_follow_up_action("Applied", str(yesterday), today=date.today()),
             "Send follow-up now",
         )
+
+    def test_tracker_outreach_history_extracts_logged_email(self):
+        history = tracker_outreach_history(
+            [
+                {
+                    "Company": "Acme",
+                    "Contact Name": "Jane Doe",
+                    "Email": "jane@acme.com",
+                    "Notes": "Subject: hello",
+                }
+            ]
+        )
+
+        self.assertIn("jane@acme.com", history["emails"])
+        self.assertIn("company_email:acme|jane@acme.com", history["identities"])
+
+    def test_filter_new_contacts_skips_previously_contacted_and_internal_duplicates(self):
+        contacts = [
+            {"name": "Jane Doe", "email": "jane@acme.com"},
+            {"name": "Jane Doe", "email": "jane@acme.com"},
+            {"name": "John Smith", "email": "john@acme.com"},
+        ]
+
+        filtered, skipped = filter_new_contacts(
+            "Acme",
+            contacts,
+            blocked_emails={"jane@acme.com"},
+            blocked_identity_keys=contact_identity_keys("Acme", "Jane Doe", "jane@acme.com"),
+        )
+
+        self.assertEqual(skipped, 2)
+        self.assertEqual([contact["email"] for contact in filtered], ["john@acme.com"])
+
+    def test_unique_send_rows_skips_prior_and_batch_duplicates(self):
+        rows = [
+            {"Email": "a@example.com"},
+            {"Email": "a@example.com"},
+            {"Email": "b@example.com"},
+        ]
+
+        unique_rows, skipped = unique_send_rows(
+            rows,
+            already_contacted_emails={"b@example.com"},
+        )
+
+        self.assertEqual([normalize_outreach_email(row["Email"]) for row in unique_rows], ["a@example.com"])
+        self.assertEqual({item["reason"] for item in skipped}, {"duplicate_in_batch", "already_contacted"})
+
+    def test_build_outreach_tracker_row_marks_sent_state(self):
+        row = build_outreach_tracker_row(
+            company="Acme",
+            preferred_role="Data Engineer Intern",
+            target_location="Remote",
+            contact_name="Jane Doe",
+            contact_link="",
+            email="jane@acme.com",
+            subject="Acme: interest in Data Engineer Intern",
+            personalization="Matched to Acme's data pipeline role.",
+            sponsorship_signal="Unknown / verify",
+            resume_name="Data Resume",
+            send_source="bulk_campaign",
+            role_source_url="https://example.com/jobs/123",
+        )
+
+        self.assertEqual(row["Company"], "Acme")
+        self.assertEqual(row["Status"], "Sent")
+        self.assertEqual(row["Email"], "jane@acme.com")
+        self.assertEqual(row["Send Source"], "bulk_campaign")
+        self.assertIn("Outreach State: sent", row["Notes"])
+        self.assertIn("Send Source: bulk_campaign", row["Notes"])
 
 
 if __name__ == "__main__":

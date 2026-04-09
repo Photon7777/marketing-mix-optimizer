@@ -24,10 +24,29 @@ TEXT_COLS = [
     "Notes",
 ]
 
+OUTREACH_TEXT_COLS = [
+    "Date",
+    "Company",
+    "Role",
+    "Location",
+    "Status",
+    "Resume Used",
+    "Follow-up Date",
+    "Contact Name",
+    "Contact Link",
+    "Email",
+    "Subject",
+    "Personalization",
+    "Sponsorship Signal",
+    "Send Source",
+    "Role Source URL",
+    "Notes",
+]
+
 
 def init_db() -> None:
     """
-    Creates tables used by the app (applications + resumes).
+    Creates tables used by the app (applications + outreach + resumes).
     NOTE: users table is created by auth.py, but we keep admin_list_users resilient.
     """
     with get_conn() as conn:
@@ -65,6 +84,40 @@ def init_db() -> None:
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Fit Summary" TEXT;')
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Resume Used" TEXT;')
 
+            # Outreach tracker
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS outreach_tracker (
+                    _row_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    "Date" TEXT,
+                    "Company" TEXT,
+                    "Role" TEXT,
+                    "Location" TEXT,
+                    "Status" TEXT,
+                    "Resume Used" TEXT,
+                    "Follow-up Date" TEXT,
+                    "Contact Name" TEXT,
+                    "Contact Link" TEXT,
+                    "Email" TEXT,
+                    "Subject" TEXT,
+                    "Personalization" TEXT,
+                    "Sponsorship Signal" TEXT,
+                    "Send Source" TEXT,
+                    "Role Source URL" TEXT,
+                    "Notes" TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_outreach_user_id ON outreach_tracker(user_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_outreach_created_at ON outreach_tracker(created_at);")
+            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Resume Used" TEXT;')
+            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Personalization" TEXT;')
+            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Sponsorship Signal" TEXT;')
+            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Send Source" TEXT;')
+            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Role Source URL" TEXT;')
+
             # Resume versions library
             cur.execute(
                 """
@@ -95,16 +148,23 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Ensures TEXT_COLS exist and are strings, and keeps only the expected columns.
     """
+    return _normalize_with_cols(df, TEXT_COLS)
+
+
+def _normalize_with_cols(df: pd.DataFrame, text_cols: list) -> pd.DataFrame:
+    """
+    Ensures the provided text columns exist and are strings.
+    """
     df = df.copy()
 
-    for c in TEXT_COLS:
+    for c in text_cols:
         if c not in df.columns:
             df[c] = ""
 
-    for c in TEXT_COLS:
+    for c in text_cols:
         df[c] = df[c].fillna("").astype(str)
 
-    keep = ["_row_id"] + TEXT_COLS
+    keep = ["_row_id"] + text_cols
     for c in keep:
         if c not in df.columns:
             df[c] = ""
@@ -186,6 +246,74 @@ def append_row(user_id: str, row: Dict) -> None:
                     values["Follow-up Date"],
                     values["Contact Name"],
                     values["Contact Link"],
+                    values["Notes"],
+                ),
+            )
+        conn.commit()
+
+
+def read_outreach_tracker_df(user_id: str) -> pd.DataFrame:
+    init_db()
+
+    query = """
+        SELECT
+            _row_id,
+            "Date","Company","Role","Location","Status","Resume Used",
+            "Follow-up Date","Contact Name","Contact Link","Email","Subject",
+            "Personalization","Sponsorship Signal","Send Source","Role Source URL","Notes"
+        FROM outreach_tracker
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+    """
+
+    with get_conn() as conn:
+        df = pd.read_sql_query(query, conn, params=(user_id,))
+
+    if df.empty:
+        return pd.DataFrame(columns=["_row_id"] + OUTREACH_TEXT_COLS)
+
+    df = _normalize_with_cols(df, OUTREACH_TEXT_COLS)
+    df = ensure_row_ids(df)
+    return df
+
+
+def append_outreach_row(user_id: str, row: Dict) -> None:
+    init_db()
+    row_id = str(uuid.uuid4())
+    values = {c: str(row.get(c, "") or "") for c in OUTREACH_TEXT_COLS}
+
+    sql = """
+        INSERT INTO outreach_tracker (
+            _row_id, user_id,
+            "Date","Company","Role","Location","Status","Resume Used",
+            "Follow-up Date","Contact Name","Contact Link","Email","Subject",
+            "Personalization","Sponsorship Signal","Send Source","Role Source URL","Notes"
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    row_id,
+                    user_id,
+                    values["Date"],
+                    values["Company"],
+                    values["Role"],
+                    values["Location"],
+                    values["Status"],
+                    values["Resume Used"],
+                    values["Follow-up Date"],
+                    values["Contact Name"],
+                    values["Contact Link"],
+                    values["Email"],
+                    values["Subject"],
+                    values["Personalization"],
+                    values["Sponsorship Signal"],
+                    values["Send Source"],
+                    values["Role Source URL"],
                     values["Notes"],
                 ),
             )
@@ -296,6 +424,7 @@ def delete_all_for_user(user_id: str) -> None:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM applications WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM outreach_tracker WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM resumes WHERE user_id = %s", (user_id,))
         conn.commit()
 

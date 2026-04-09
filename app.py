@@ -26,10 +26,21 @@ from tools import (
 )
 from agent import generate_application_materials, generate_outreach_materials
 from company_discovery import company_key, discover_companies_from_web, sponsorship_signal_for_company
+from outreach_guardrails import (
+    build_outreach_tracker_row,
+    contact_identity_keys,
+    filter_new_contacts,
+    is_duplicate_contact,
+    normalize_outreach_email,
+    tracker_outreach_history,
+    unique_send_rows,
+)
 
 from db_store import (
     append_row,
+    append_outreach_row,
     read_tracker_df,
+    read_outreach_tracker_df,
     ensure_row_ids,
     overwrite_tracker_for_user,
     merge_uploaded_csv,
@@ -772,6 +783,96 @@ def extract_resume_highlights(resume_text: str, limit: int = 3) -> list:
     return lines[:limit]
 
 
+OUTREACH_FOCUS_RULES = [
+    (
+        ("data engineer", "analytics engineer", "etl", "pipeline", "warehouse", "dbt", "spark", "airflow"),
+        {
+            "subject_hook": "Data Pipelines",
+            "value_prop": "I am especially interested in teams where dependable pipelines, warehousing, and automation make analytics work possible at scale.",
+            "followup_hook": "data pipelines and analytics infrastructure",
+        },
+    ),
+    (
+        ("data analyst", "business analyst", "analytics", "dashboard", "reporting", "insight", "bi", "metrics"),
+        {
+            "subject_hook": "Analytics Workflows",
+            "value_prop": "I tend to do my best work where SQL, Python, and reporting workflows need to turn messy data into dependable day-to-day decision support.",
+            "followup_hook": "analytics and reporting work",
+        },
+    ),
+    (
+        ("machine learning", "data science", "ai", "ml", "llm", "rag", "retrieval", "applied scientist"),
+        {
+            "subject_hook": "Applied AI",
+            "value_prop": "I am drawn to teams that connect solid data work with practical machine learning or AI systems that have to be useful beyond a demo.",
+            "followup_hook": "applied AI and data work",
+        },
+    ),
+    (
+        ("software engineer", "backend", "frontend", "full stack", "platform", "developer", "api"),
+        {
+            "subject_hook": "Product Engineering",
+            "value_prop": "I enjoy roles that sit between implementation, automation, and product-minded engineering where reliability matters as much as speed.",
+            "followup_hook": "product engineering work",
+        },
+    ),
+    (
+        ("product", "apm", "product manager", "product analyst", "experimentation", "roadmap"),
+        {
+            "subject_hook": "Product + Analytics",
+            "value_prop": "I am interested in teams where analysis, experimentation, and product thinking are tightly connected to execution.",
+            "followup_hook": "product and analytics work",
+        },
+    ),
+]
+
+
+def _first_sentence(text: str, limit: int = 240) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return ""
+    sentence = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)[0].strip()
+    if len(sentence) > limit:
+        sentence = sentence[:limit].rstrip(" ,;:") + "..."
+    return sentence
+
+
+def choose_outreach_focus(role_title: str, matched_role: str = "", primary_focus: str = "", company_context: str = "") -> dict:
+    combined = " ".join(part for part in [role_title, matched_role, primary_focus, company_context] if part).lower()
+    for keywords, pack in OUTREACH_FOCUS_RULES:
+        if any(keyword in combined for keyword in keywords):
+            return pack
+    return {
+        "subject_hook": "Data + AI",
+        "value_prop": "I am looking for roles where analysis, automation, and product-minded execution overlap in a practical way.",
+        "followup_hook": "data and AI work",
+    }
+
+
+def recipient_bucket_from_title(title: str) -> str:
+    lowered = (title or "").lower()
+    if any(token in lowered for token in ("recruit", "talent", "people", "hr")):
+        return "recruiting"
+    if any(token in lowered for token in ("cto", "chief", "co-founder", "founder", "vp", "head of")):
+        return "leadership"
+    if "manager" in lowered or "director" in lowered:
+        return "manager"
+    return "team"
+
+
+def summarize_candidate_angle(candidate_summary: str, highlights: list) -> str:
+    summary = _first_sentence(candidate_summary, limit=260)
+    if not summary:
+        summary = (
+            "I am currently pursuing an MS in Information Systems at UMD and have hands-on experience in analytics, SQL, Python, dashboards, and AI-enabled application work."
+        )
+    if summary and summary[-1] not in ".!?":
+        summary += "."
+    if highlights:
+        return summary + " Recent work includes " + "; ".join(highlights[:2]) + "."
+    return summary
+
+
 def build_cold_email(
     candidate_summary: str,
     company_name: str,
@@ -785,6 +886,10 @@ def build_cold_email(
     company_reason: str = "",
     sender_name: str = "Sai Praneeth",
     company_context: str = "",
+    matched_role: str = "",
+    primary_focus: str = "",
+    discovery_source: str = "",
+    role_source_url: str = "",
     use_ai_personalization: bool = True,
 ) -> dict:
     first_name = (recipient_name or "there").split()[0] if recipient_name else "there"
@@ -792,16 +897,14 @@ def build_cold_email(
     role_ref = role_title or "relevant opportunities"
     sender_display = (sender_name or "").strip() or "Sai Praneeth"
     highlights = extract_resume_highlights(resume_text, limit=2)
+    focus_pack = choose_outreach_focus(role_ref, matched_role=matched_role, primary_focus=primary_focus, company_context=company_context)
+    recipient_bucket = recipient_bucket_from_title(recipient_title)
+    opportunity_ref = (matched_role or "").strip() or role_ref
+    candidate_line = summarize_candidate_angle(candidate_summary, highlights)
 
-    fit_sentence = candidate_summary.strip() if candidate_summary.strip() else (
-        "I am currently pursuing an MS in Information Systems at UMD and have hands-on experience in analytics, SQL, Python, dashboards, and AI-enabled application work."
-    )
-    highlight_text = ""
-    if highlights:
-        highlight_text = " Relevant highlights: " + " | ".join(highlights[:2])
-
-    reason_clean = company_reason.strip()
-    reason_text = f" {reason_clean}" if reason_clean else ""
+    reason_clean = (company_reason or "").strip()
+    if reason_clean and reason_clean[-1] not in ".!?":
+        reason_clean += "."
     link_lines = []
     if linkedin_url.strip():
         link_lines.append(f"LinkedIn: {linkedin_url.strip()}")
@@ -811,27 +914,43 @@ def build_cold_email(
     if link_block:
         link_block = "\n" + link_block
 
-    subject = f"Interest in {role_ref} opportunities at {company_ref}"
+    if matched_role.strip():
+        subject = f"{company_ref}: interest in {opportunity_ref}"
+    else:
+        subject = f"{company_ref}: {focus_pack['subject_hook']} internship interest"
 
-    body = f"""Hi {first_name},
+    ask_line = "If there is a relevant opening now or coming up, I would appreciate the right next step or the best person on the team to speak with."
+    if recipient_bucket == "recruiting":
+        ask_line = "If there is a current or upcoming fit, I would appreciate the right next step in the process or the best team to connect with."
+    elif recipient_bucket == "manager":
+        ask_line = "If your team is hiring in this area, I would value any guidance on where this kind of background might fit best."
+    elif recipient_bucket == "leadership":
+        ask_line = "If there is a team where this background could be useful, I would be grateful for a quick pointer on the right next step."
 
-I came across {company_ref} while exploring {role_ref} roles and wanted to reach out because your role as {recipient_title or 'part of the team'} seemed like a relevant point of contact.{reason_text}
+    role_context_line = ""
+    if recipient_title.strip():
+        role_context_line = f"Given your role as {recipient_title}, I thought this might be relevant."
 
-{fit_sentence}{highlight_text}
+    body_lines = [
+        f"Hi {first_name},",
+        "",
+        reason_clean or f"I am reaching out because {company_ref} seems closely aligned with the kind of {role_ref} work I am targeting.",
+        "",
+        candidate_line,
+        focus_pack["value_prop"],
+        "",
+    ]
+    if role_context_line:
+        body_lines.extend([role_context_line, ""])
+    body_lines.extend([ask_line + link_block, "", "Best,", sender_display])
+    body = "\n".join(body_lines)
 
-If there is a suitable opening now or coming up, I would be grateful for the right next step or the best person on the team to speak with.{link_block}
-
-Best,
-{sender_display}
-"""
-
-    followup = f"""Hi {first_name},
-
-Just following up on my earlier note regarding {role_ref} opportunities at {company_ref}. I remain very interested and would appreciate any guidance on the right next step or who on the team would be best to contact.{link_block}
-
-Best,
-{sender_display}
-"""
+    followup = (
+        f"Hi {first_name},\n\n"
+        f"Following up on my note about {opportunity_ref} at {company_ref}. I remain interested because the opportunity seems closely aligned with my background in {focus_pack['followup_hook']}. "
+        f"If there is a better next step or person to reach out to, I would appreciate the guidance.{link_block}\n\n"
+        f"Best,\n{sender_display}\n"
+    )
 
     fallback = {
         "subject": subject,
@@ -851,6 +970,10 @@ Best,
             company_name=company_ref,
             company_context=company_context,
             company_reason=reason_clean,
+            matched_role=matched_role,
+            primary_focus=primary_focus,
+            discovery_source=discovery_source,
+            role_source_url=role_source_url,
             role_title=role_ref,
             recipient_name=recipient_name,
             recipient_title=recipient_title,
@@ -922,7 +1045,22 @@ def scrape_company_context(company_name: str, company_domain: str = "") -> str:
     return " ".join(snippets)[:2200]
 
 
-def company_reason_from_context(company_name: str, preferred_role: str, context_text: str) -> str:
+def company_reason_from_context(
+    company_name: str,
+    preferred_role: str,
+    context_text: str,
+    *,
+    matched_role: str = "",
+    primary_focus: str = "",
+) -> str:
+    if matched_role.strip():
+        return (
+            f"I noticed {company_name} has been hiring for {matched_role.strip()}, and that feels closely aligned with the kind of {preferred_role or 'internship'} work I am targeting."
+        )
+    if primary_focus.strip():
+        return (
+            f"I was interested in {company_name}'s work around {primary_focus.strip()}, which feels closely aligned with the kind of {preferred_role or 'internship'} work I want to keep building toward."
+        )
     role_words = [w for w in re.findall(r"[A-Za-z]+", preferred_role or "") if len(w) > 3][:3]
     lower = (context_text or "").lower()
     found = [w for w in role_words if w.lower() in lower]
@@ -970,6 +1108,124 @@ def active_resume_attachment() -> dict:
     }
 
 
+def _session_outreach_set(key: str) -> set:
+    current = st.session_state.get(key)
+    if isinstance(current, set):
+        return current
+    normalized = set(current or [])
+    st.session_state[key] = normalized
+    return normalized
+
+
+def current_outreach_history(user_id: str) -> tuple[set, set]:
+    outreach_history = tracker_outreach_history(read_outreach_tracker_df(user_id))
+    legacy_history = tracker_outreach_history(read_tracker_df(user_id))
+    session_emails = _session_outreach_set("sent_outreach_emails")
+    session_identities = _session_outreach_set("sent_outreach_identity_keys")
+    return (
+        set(outreach_history["emails"]) | set(legacy_history["emails"]) | set(session_emails),
+        set(outreach_history["identities"]) | set(legacy_history["identities"]) | set(session_identities),
+    )
+
+
+def remember_outreach_contact(company: str, contact_name: str, email: str) -> None:
+    normalized_email = normalize_outreach_email(email)
+    if normalized_email:
+        _session_outreach_set("sent_outreach_emails").add(normalized_email)
+    _session_outreach_set("sent_outreach_identity_keys").update(
+        contact_identity_keys(company, contact_name, email)
+    )
+
+
+def log_sent_outreach_to_tracker(
+    user_id: str,
+    *,
+    company: str,
+    preferred_role: str,
+    target_location: str,
+    contact_name: str,
+    contact_link: str,
+    email: str,
+    subject: str,
+    personalization: str,
+    sponsorship_signal: str,
+    resume_name: str,
+    send_source: str,
+    role_source_url: str = "",
+) -> None:
+    append_outreach_row(
+        user_id,
+        build_outreach_tracker_row(
+            company=company,
+            preferred_role=preferred_role,
+            target_location=target_location,
+            contact_name=contact_name,
+            contact_link=contact_link,
+            email=email,
+            subject=subject,
+            personalization=personalization,
+            sponsorship_signal=sponsorship_signal,
+            resume_name=resume_name,
+            send_source=send_source,
+            role_source_url=role_source_url,
+        ),
+    )
+
+
+def log_draft_outreach_to_tracker(
+    user_id: str,
+    *,
+    company: str,
+    preferred_role: str,
+    target_location: str,
+    contact_name: str,
+    contact_link: str,
+    email: str,
+    subject: str,
+    personalization: str,
+    sponsorship_signal: str,
+    resume_name: str,
+    send_source: str,
+    role_source_url: str = "",
+) -> None:
+    append_outreach_row(
+        user_id,
+        {
+            "Date": str(date.today()),
+            "Company": company,
+            "Role": preferred_role or "Cold outreach",
+            "Location": target_location,
+            "Status": "Drafted",
+            "Resume Used": resume_name,
+            "Follow-up Date": str(date.today() + timedelta(days=5)),
+            "Contact Name": contact_name,
+            "Contact Link": contact_link,
+            "Email": email,
+            "Subject": subject,
+            "Personalization": personalization,
+            "Sponsorship Signal": sponsorship_signal or "Unknown / verify",
+            "Send Source": send_source,
+            "Role Source URL": role_source_url,
+            "Notes": "Outreach State: drafted",
+        },
+    )
+
+
+def mark_outreach_rows(df: pd.DataFrame, emails: set, status: str) -> pd.DataFrame:
+    updated = df.copy()
+    if "Send Status" not in updated.columns:
+        updated["Send Status"] = ""
+    normalized_targets = {normalize_outreach_email(email) for email in emails if normalize_outreach_email(email)}
+    if not normalized_targets:
+        return updated
+    email_series = updated.get("Email", pd.Series(dtype=str)).fillna("").astype(str).map(normalize_outreach_email)
+    mask = email_series.isin(normalized_targets)
+    if "Send" in updated.columns:
+        updated.loc[mask, "Send"] = False
+    updated.loc[mask, "Send Status"] = status
+    return updated
+
+
 def attachment_status_label(attachment: dict) -> str:
     return "with resume attached" if attachment.get("attachment_bytes") else "without resume attachment"
 
@@ -992,15 +1248,28 @@ def build_bulk_outreach_rows(
     max_contacts: int = 6,
     use_ai_personalization: bool = True,
     discovery_metadata: Optional[dict] = None,
+    blocked_emails: Optional[set] = None,
+    blocked_contact_keys: Optional[set] = None,
 ) -> list[dict]:
     client = HunterClient()
     discovery_metadata = discovery_metadata or {}
+    blocked_emails = set(blocked_emails or set())
+    blocked_contact_keys = set(blocked_contact_keys or set())
     rows = []
+    seen_companies = set()
     for company in company_names:
         company = company.strip()
         if not company:
             continue
+        company_identity = company_key(company)
+        if company_identity in seen_companies:
+            continue
+        seen_companies.add(company_identity)
         meta = discovery_metadata.get(company_key(company), {})
+        matched_role = str(meta.get("example_role") or meta.get("role_evidence") or "").strip()
+        primary_focus = str(meta.get("primary_focus") or "").strip()
+        company_domain = str(meta.get("company_domain") or "").strip()
+        company_website = str(meta.get("company_website") or "").strip()
         sponsorship = {
             "sponsorship_signal": meta.get("sponsorship_signal"),
             "sponsorship_source": meta.get("sponsorship_source"),
@@ -1017,12 +1286,35 @@ def build_bulk_outreach_rows(
                 seniorities=seniorities,
                 per_page=max_contacts,
             )
-            best = client.pick_best_contact(contacts) or {}
+            filtered_contacts, skipped_duplicates = filter_new_contacts(
+                company,
+                contacts,
+                blocked_emails=blocked_emails,
+                blocked_identity_keys=blocked_contact_keys,
+            )
+            best = client.pick_best_contact(list(filtered_contacts)) or {}
         except Exception:
             contacts = []
             best = {}
-        context = scrape_company_context(company, best.get("company_domain", ""))
-        reason = company_reason_from_context(company, preferred_role, context)
+            skipped_duplicates = 0
+        company_domain = best.get("company_domain", "") or company_domain
+        context_parts = [
+            primary_focus,
+            matched_role,
+            meta.get("role_evidence", ""),
+            meta.get("snippet", ""),
+        ]
+        context = " ".join(str(part).strip() for part in context_parts if str(part).strip())[:1400]
+        if len(context) < 400:
+            scraped_context = scrape_company_context(company, company_domain or company_website)
+            context = " ".join(part for part in [context, scraped_context] if part).strip()[:2200]
+        reason = company_reason_from_context(
+            company,
+            preferred_role,
+            context,
+            matched_role=matched_role,
+            primary_focus=primary_focus,
+        )
         pack = build_cold_email(
             candidate_summary=candidate_summary,
             company_name=company,
@@ -1035,12 +1327,29 @@ def build_bulk_outreach_rows(
             company_reason=reason,
             sender_name=sender_name,
             company_context=context,
+            matched_role=matched_role,
+            primary_focus=primary_focus,
+            discovery_source=str(meta.get("source", "")),
+            role_source_url=str(meta.get("source_url", "")),
             use_ai_personalization=use_ai_personalization,
         )
+        duplicate_check = "New contact"
+        if contacts and not best:
+            duplicate_check = "All matching contacts were already contacted or queued"
+        elif skipped_duplicates:
+            duplicate_check = f"Filtered {skipped_duplicates} duplicate contact(s)"
+
+        selected_email = normalize_outreach_email(best.get("email", ""))
+        if selected_email:
+            blocked_emails.add(selected_email)
+        blocked_contact_keys.update(contact_identity_keys(company, best.get("name", ""), best.get("email", "")))
         rows.append({
             "Send": bool(best.get("email")),
             "Company": company,
-            "Company Domain": best.get("company_domain", ""),
+            "Company Domain": company_domain,
+            "Company Website": company_website,
+            "Matched Role": matched_role,
+            "Discovery Focus": primary_focus,
             "Contact Name": best.get("name", ""),
             "Contact Title": best.get("title", ""),
             "Email": best.get("email", ""),
@@ -1054,6 +1363,7 @@ def build_bulk_outreach_rows(
             "Discovery Source": meta.get("source", "manual"),
             "Open Role Evidence": meta.get("role_evidence", ""),
             "Role Source URL": meta.get("source_url", ""),
+            "Duplicate Check": duplicate_check,
             "Sponsorship Signal": sponsorship["sponsorship_signal"],
             "Sponsorship Source": sponsorship["sponsorship_source"],
             "Sponsorship Lookup": sponsorship["sponsorship_lookup_url"],
@@ -1399,7 +1709,7 @@ with tabs[0]:
 # -------------------------
 with tabs[1]:
     st.markdown("### 📧 Cold Outreach Campaigns")
-    st.caption("Attach your resume, personalize emails to each company, and run individual, bulk, or daily company discovery using Hunter plus light web discovery.")
+    st.caption("Attach your resume, personalize emails to each company, and run individual, bulk, or daily company discovery using Hunter plus hybrid structured/open-web role discovery.")
     st.caption(f"Safety guardrail: bulk sends are capped at {MAX_EMAILS_PER_BATCH} emails per click.")
 
     if "outreach_preferred_role" not in st.session_state:
@@ -1481,6 +1791,8 @@ with tabs[1]:
                     "company",
                     "source",
                     "score",
+                    "primary_focus",
+                    "example_role",
                     "sponsorship_signal",
                     "sponsorship_lookup_url",
                     "role_evidence",
@@ -1598,7 +1910,7 @@ with tabs[1]:
     st.caption("When enabled, bulk and daily campaign building may take longer because each company gets its own draft.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    mode_tabs = st.tabs(["Individual outreach", "Bulk campaign", "Daily discovery"])
+    mode_tabs = st.tabs(["Individual outreach", "Bulk campaign", "Daily discovery", "Outreach Tracker"])
 
     with mode_tabs[0]:
         col1, col2 = st.columns([1.05, 1])
@@ -1622,8 +1934,21 @@ with tabs[1]:
                                 seniorities=outreach_seniority,
                                 per_page=6,
                             )
-                        st.session_state["individual_contacts"] = results
-                        st.success(f"Found {len(results)} contact(s).")
+                        history_emails, history_keys = current_outreach_history(user_id)
+                        company_label = individual_company.strip() or individual_domain.strip()
+                        filtered_results, skipped_duplicates = filter_new_contacts(
+                            company_label,
+                            results,
+                            blocked_emails=history_emails,
+                            blocked_identity_keys=history_keys,
+                        )
+                        st.session_state["individual_contacts"] = list(filtered_results)
+                        if filtered_results:
+                            st.success(f"Found {len(filtered_results)} new contact(s).")
+                        else:
+                            st.warning("Hunter only returned contacts that were already contacted or queued.")
+                        if skipped_duplicates:
+                            st.info(f"Filtered out {skipped_duplicates} duplicate or previously-contacted contact(s).")
                     except Exception as e:
                         st.error(str(e))
 
@@ -1674,7 +1999,19 @@ with tabs[1]:
                 if not recipient_email:
                     st.error("Selected contact has no email.")
                 else:
+                    company_label = individual_company or lead.get("company_name", "")
+                    history_emails, history_keys = current_outreach_history(user_id)
+                    if is_duplicate_contact(
+                        company_label,
+                        lead.get("name", ""),
+                        recipient_email,
+                        blocked_emails=history_emails,
+                        blocked_identity_keys=history_keys,
+                    ):
+                        st.error("This contact has already been emailed or queued. Pick a new contact to avoid duplicates.")
+                        st.stop()
                     try:
+                        log_failed = False
                         with st.spinner("Sending email through Gmail..."):
                             sender = GmailSender.from_env()
                             attachment = active_resume_attachment()
@@ -1687,7 +2024,27 @@ with tabs[1]:
                                 body_html=plain_text_to_html(st.session_state.get("individual_body", "")),
                                 **attachment,
                             )
+                        try:
+                            log_sent_outreach_to_tracker(
+                                user_id,
+                                company=company_label,
+                                preferred_role=preferred_role,
+                                target_location=target_location,
+                                contact_name=str(lead.get("name", "")),
+                                contact_link=str(lead.get("linkedin") or lead.get("linkedin_url") or ""),
+                                email=recipient_email,
+                                subject=st.session_state.get("individual_subject", ""),
+                                personalization=st.session_state.get("individual_company_reason", ""),
+                                sponsorship_signal="Unknown / verify",
+                                resume_name=st.session_state.get("resume_name", ""),
+                                send_source="individual_outreach",
+                            )
+                        except Exception:
+                            log_failed = True
+                        remember_outreach_contact(company_label, lead.get("name", ""), recipient_email)
                         st.success(f"Sent to {recipient_email} {attachment_status_label(attachment)} ✅")
+                        if log_failed:
+                            st.warning("The email sent successfully, but outreach tracker logging failed. Duplicate protection will still work for this session.")
                     except Exception as e:
                         st.error(str(e))
             st.markdown('</div>', unsafe_allow_html=True)
@@ -1703,6 +2060,7 @@ with tabs[1]:
         if build_bulk:
             try:
                 with st.spinner("Building campaign: searching contacts, researching companies, and drafting emails..."):
+                    history_emails, history_keys = current_outreach_history(user_id)
                     rows = build_bulk_outreach_rows(
                         company_names=companies,
                         preferred_role=preferred_role,
@@ -1717,6 +2075,8 @@ with tabs[1]:
                         max_contacts=6,
                         use_ai_personalization=niche_enabled,
                         discovery_metadata=role_discovery_metadata,
+                        blocked_emails=history_emails,
+                        blocked_contact_keys=history_keys,
                     )
                 st.session_state["bulk_queue_df"] = pd.DataFrame(rows)
                 st.success(f"Built campaign for {len(rows)} companies.")
@@ -1730,6 +2090,7 @@ with tabs[1]:
                 use_container_width=True,
                 num_rows="fixed",
                 column_config={
+                    "Company Website": st.column_config.LinkColumn("Company Website"),
                     "Role Source URL": st.column_config.LinkColumn("Role Source URL"),
                     "Sponsorship Lookup": st.column_config.LinkColumn("Sponsorship Lookup"),
                 },
@@ -1739,10 +2100,18 @@ with tabs[1]:
             with c1:
                 if st.button("📨 Send selected emails", use_container_width=True):
                     try:
-                        send_rows = [
+                        selected_rows = [
                             row for _, row in edited_bulk.iterrows()
                             if bool(row.get("Send")) and str(row.get("Email", "")).strip()
                         ]
+                        history_emails, _ = current_outreach_history(user_id)
+                        send_rows, skipped_rows = unique_send_rows(
+                            selected_rows,
+                            already_contacted_emails=history_emails,
+                        )
+                        if not send_rows:
+                            st.warning("No new emails to send. The selected rows were duplicates or were already contacted.")
+                            st.stop()
                         if len(send_rows) > MAX_EMAILS_PER_BATCH:
                             st.error(f"Select {MAX_EMAILS_PER_BATCH} or fewer emails per batch to reduce accidental bulk sends.")
                             st.stop()
@@ -1752,6 +2121,8 @@ with tabs[1]:
                             if not attachment.get("attachment_bytes"):
                                 st.warning("No attachable resume file is active; selected emails will send without attachments.")
                             sent = 0
+                            sent_emails = set()
+                            log_failures = 0
                             for row in send_rows:
                                 email = str(row.get("Email", "")).strip()
                                 sender.send_email(
@@ -1761,42 +2132,83 @@ with tabs[1]:
                                     body_html=plain_text_to_html(str(row.get("Body", ""))),
                                     **attachment,
                                 )
+                                try:
+                                    log_sent_outreach_to_tracker(
+                                        user_id,
+                                        company=str(row.get("Company", "")),
+                                        preferred_role=preferred_role,
+                                        target_location=target_location,
+                                        contact_name=str(row.get("Contact Name", "")),
+                                        contact_link="",
+                                        email=email,
+                                        subject=str(row.get("Subject", "")),
+                                        personalization=str(row.get("Personalization", row.get("Company Reason", ""))),
+                                        sponsorship_signal=str(row.get("Sponsorship Signal", "Unknown / verify")),
+                                        resume_name=st.session_state.get("resume_name", ""),
+                                        send_source="bulk_campaign",
+                                        role_source_url=str(row.get("Role Source URL", "")),
+                                    )
+                                except Exception:
+                                    log_failures += 1
+                                remember_outreach_contact(str(row.get("Company", "")), str(row.get("Contact Name", "")), email)
+                                sent_emails.add(email)
                                 sent += 1
+                        st.session_state["bulk_queue_df"] = mark_outreach_rows(
+                            edited_bulk,
+                            sent_emails,
+                            "Sent this session",
+                        )
                         st.success(f"Sent {sent} email(s) {attachment_status_label(attachment)} ✅")
+                        if skipped_rows:
+                            st.warning(f"Skipped {len(skipped_rows)} duplicate or already-contacted email(s).")
+                        if log_failures:
+                            st.warning(f"{log_failures} sent email(s) could not be auto-logged to the outreach tracker.")
                     except Exception as e:
                         st.error(str(e))
             with c2:
-                if st.button("💾 Save selected to tracker", use_container_width=True):
-                    with st.spinner("Saving selected outreach rows to your tracker..."):
+                if st.button("💾 Save selected to outreach tracker", use_container_width=True):
+                    with st.spinner("Saving selected outreach rows to the outreach tracker..."):
                         saved = 0
                         skipped = 0
+                        history_emails, history_keys = current_outreach_history(user_id)
                         for _, row in edited_bulk.iterrows():
                             if not bool(row.get("Send")):
                                 continue
+                            email = str(row.get("Email", "")).strip()
+                            company_name = str(row.get("Company", ""))
+                            contact_name = str(row.get("Contact Name", ""))
+                            if is_duplicate_contact(
+                                company_name,
+                                contact_name,
+                                email,
+                                blocked_emails=history_emails,
+                                blocked_identity_keys=history_keys,
+                            ):
+                                skipped += 1
+                                continue
                             try:
-                                append_row(
+                                log_draft_outreach_to_tracker(
                                     user_id,
-                                    {
-                                        "Date Applied": str(date.today()),
-                                        "Company": str(row.get("Company", "")),
-                                        "Role": preferred_role or "Cold outreach",
-                                        "Job Link": "",
-                                        "Location": target_location,
-                                        "Status": "Interested",
-                                        "Fit Score": "",
-                                        "Priority": "",
-                                        "Fit Summary": "Bulk cold outreach draft generated",
-                                        "Resume Used": st.session_state.get("resume_name", ""),
-                                        "Follow-up Date": str(date.today() + timedelta(days=5)),
-                                        "Contact Name": str(row.get("Contact Name", "")),
-                                        "Contact Link": linkedin_url,
-                                        "Notes": f"Email: {row.get('Email','')}\nSubject: {row.get('Subject','')}\nPersonalization: {row.get('Personalization', row.get('Company Reason',''))}\nSponsorship: {row.get('Sponsorship Signal','Unknown / verify')}",
-                                    },
+                                    company=company_name,
+                                    preferred_role=preferred_role,
+                                    target_location=target_location,
+                                    contact_name=contact_name,
+                                    contact_link="",
+                                    email=email,
+                                    subject=str(row.get("Subject", "")),
+                                    personalization=str(row.get("Personalization", row.get("Company Reason", ""))),
+                                    sponsorship_signal=str(row.get("Sponsorship Signal", "Unknown / verify")),
+                                    resume_name=st.session_state.get("resume_name", ""),
+                                    send_source="bulk_campaign",
+                                    role_source_url=str(row.get("Role Source URL", "")),
                                 )
+                                if email:
+                                    history_emails.add(normalize_outreach_email(email))
+                                history_keys.update(contact_identity_keys(company_name, contact_name, email))
                                 saved += 1
                             except Exception:
                                 skipped += 1
-                    st.success(f"Saved {saved} row(s) to tracker ✅")
+                    st.success(f"Saved {saved} row(s) to the outreach tracker ✅")
                     if skipped:
                         st.warning(f"Skipped {skipped} row(s) because they could not be saved.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1819,6 +2231,7 @@ with tabs[1]:
                 )
                 company_names = [d["company"] for d in discovered]
                 daily_discovery_metadata = {company_key(item.get("company", "")): item for item in discovered}
+                history_emails, history_keys = current_outreach_history(user_id)
                 rows = build_bulk_outreach_rows(
                     company_names=company_names,
                     preferred_role=preferred_role,
@@ -1833,6 +2246,8 @@ with tabs[1]:
                     max_contacts=5,
                     use_ai_personalization=niche_enabled,
                     discovery_metadata=daily_discovery_metadata,
+                    blocked_emails=history_emails,
+                    blocked_contact_keys=history_keys,
                 )
             st.session_state["daily_outreach_queue"] = rows
             st.session_state["daily_discovery_last_run"] = today_key
@@ -1844,6 +2259,7 @@ with tabs[1]:
                 daily_df,
                 use_container_width=True,
                 column_config={
+                    "Company Website": st.column_config.LinkColumn("Company Website"),
                     "Role Source URL": st.column_config.LinkColumn("Role Source URL"),
                     "Sponsorship Lookup": st.column_config.LinkColumn("Sponsorship Lookup"),
                 },
@@ -1851,10 +2267,18 @@ with tabs[1]:
             )
             if st.button("📨 Send selected daily emails", use_container_width=True):
                 try:
-                    send_rows = [
+                    selected_rows = [
                         row for _, row in edited_daily.iterrows()
                         if bool(row.get("Send")) and str(row.get("Email", "")).strip()
                     ]
+                    history_emails, _ = current_outreach_history(user_id)
+                    send_rows, skipped_rows = unique_send_rows(
+                        selected_rows,
+                        already_contacted_emails=history_emails,
+                    )
+                    if not send_rows:
+                        st.warning("No new daily emails to send. The selected rows were duplicates or were already contacted.")
+                        st.stop()
                     if len(send_rows) > MAX_EMAILS_PER_BATCH:
                         st.error(f"Select {MAX_EMAILS_PER_BATCH} or fewer emails per batch to reduce accidental bulk sends.")
                         st.stop()
@@ -1864,6 +2288,8 @@ with tabs[1]:
                         if not attachment.get("attachment_bytes"):
                             st.warning("No attachable resume file is active; selected emails will send without attachments.")
                         sent = 0
+                        sent_emails = set()
+                        log_failures = 0
                         for row in send_rows:
                             email = str(row.get("Email", "")).strip()
                             sender.send_email(
@@ -1873,10 +2299,82 @@ with tabs[1]:
                                 body_html=plain_text_to_html(str(row.get("Body", ""))),
                                 **attachment,
                             )
+                            try:
+                                log_sent_outreach_to_tracker(
+                                    user_id,
+                                    company=str(row.get("Company", "")),
+                                    preferred_role=preferred_role,
+                                    target_location=target_location,
+                                    contact_name=str(row.get("Contact Name", "")),
+                                    contact_link="",
+                                    email=email,
+                                    subject=str(row.get("Subject", "")),
+                                    personalization=str(row.get("Personalization", row.get("Company Reason", ""))),
+                                    sponsorship_signal=str(row.get("Sponsorship Signal", "Unknown / verify")),
+                                    resume_name=st.session_state.get("resume_name", ""),
+                                    send_source="daily_discovery",
+                                    role_source_url=str(row.get("Role Source URL", "")),
+                                )
+                            except Exception:
+                                log_failures += 1
+                            remember_outreach_contact(str(row.get("Company", "")), str(row.get("Contact Name", "")), email)
+                            sent_emails.add(email)
                             sent += 1
+                    st.session_state["daily_outreach_queue"] = mark_outreach_rows(
+                        edited_daily,
+                        sent_emails,
+                        "Sent this session",
+                    ).to_dict("records")
                     st.success(f"Sent {sent} daily discovery email(s) {attachment_status_label(attachment)} ✅")
+                    if skipped_rows:
+                        st.warning(f"Skipped {len(skipped_rows)} duplicate or already-contacted daily email(s).")
+                    if log_failures:
+                        st.warning(f"{log_failures} sent daily email(s) could not be auto-logged to the outreach tracker.")
                 except Exception as e:
                     st.error(str(e))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with mode_tabs[3]:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.caption("This tracker is separate from the job application pipeline so cold outreach history stays isolated and easier to review.")
+        outreach_df = read_outreach_tracker_df(user_id)
+        if outreach_df.empty:
+            st.info("No outreach rows yet. Sent emails and saved drafts from Cold Outreach will appear here.")
+        else:
+            status_series = outreach_df["Status"].fillna("").astype(str)
+            followup_dates = pd.to_datetime(outreach_df["Follow-up Date"], errors="coerce")
+            today_ts = pd.Timestamp(date.today())
+            o1, o2, o3, o4 = st.columns(4)
+            o1.metric("Outreach rows", len(outreach_df))
+            o2.metric("Sent", int((status_series == "Sent").sum()))
+            o3.metric("Drafted", int((status_series == "Drafted").sum()))
+            o4.metric("Follow-up due", int(((followup_dates.notna()) & (followup_dates < today_ts) & (~status_series.isin(["Closed", "Replied"]))).sum()))
+
+            status_filter = st.multiselect(
+                "Filter outreach status",
+                sorted([status for status in status_series.unique().tolist() if status.strip()]),
+                key="outreach_tracker_status_filter",
+            )
+            filtered_outreach = outreach_df.copy()
+            if status_filter:
+                filtered_outreach = filtered_outreach[filtered_outreach["Status"].isin(status_filter)]
+
+            st.dataframe(
+                filtered_outreach.drop(columns=["_row_id"], errors="ignore"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Role Source URL": st.column_config.LinkColumn("Role Source URL"),
+                    "Contact Link": st.column_config.LinkColumn("Contact Link"),
+                },
+            )
+            st.download_button(
+                "⬇️ Download outreach tracker CSV",
+                data=filtered_outreach.drop(columns=["_row_id"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                file_name="outreach_tracker.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
         st.markdown('</div>', unsafe_allow_html=True)
 
 # -------------------------

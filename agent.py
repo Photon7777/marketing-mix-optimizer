@@ -63,17 +63,21 @@ subject, body, followup, personalization_angle
 
 Rules:
 - Make the message specific to the company, recipient role, target role, and candidate background.
-- Use one concrete company angle from company_context or company_reason, but only if it is explicitly provided.
+- Prefer the strongest concrete company angle in this order: matched_role, primary_focus, company_reason, company_context.
+- If matched_role is present, anchor the opening to that role instead of generic curiosity language.
 - Use one concrete candidate angle from candidate_summary or resume_highlights_source.
 - Connect the candidate angle to the target role in a natural way.
 - Vary the opening and subject line; do not reuse "I came across..." as the default opening.
+- Use a crisp structure: company/role fit, candidate proof, recipient-aware ask.
 - If recipient_title is recruiting/talent, ask for the right opening or process; if it is a manager, ask for guidance on relevant teams or skills.
 - Do not invent candidate experience, company facts, openings, referrals, or prior contact.
 - If company context is weak, use a cautious angle and do not pretend to know details.
+- If discovery_source or role_source_url suggests where the role was found, you may reference that a matching role was discovered, but never claim the user already applied.
 - Keep the first email under 150 words and the follow-up under 95 words.
 - Avoid hype, generic flattery, spammy wording, and identical phrasing across companies.
 - Keep the tone warm, specific, and direct. No long paragraphs.
 - Include LinkedIn and portfolio links only if provided.
+- personalization_angle should be a short phrase explaining the exact niche angle used.
 """
 
 
@@ -95,6 +99,10 @@ def generate_outreach_materials(
     company_name: str,
     company_context: str,
     company_reason: str,
+    matched_role: str,
+    primary_focus: str,
+    discovery_source: str,
+    role_source_url: str,
     role_title: str,
     recipient_name: str,
     recipient_title: str,
@@ -115,6 +123,10 @@ def generate_outreach_materials(
         "company_name": company_name,
         "company_context": (company_context or "")[:2500],
         "company_reason": company_reason,
+        "matched_role": matched_role,
+        "primary_focus": primary_focus,
+        "discovery_source": discovery_source,
+        "role_source_url": role_source_url,
         "target_role": role_title,
         "recipient_name": recipient_name,
         "recipient_title": recipient_title,
