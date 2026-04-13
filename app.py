@@ -32,6 +32,20 @@ from agent import (
     generate_outreach_next_step,
 )
 from company_discovery import company_key, discover_companies_from_web, sponsorship_signal_for_company
+from dashboard_metrics import (
+    FOLLOW_UP_BUCKET_COLORS,
+    FOLLOW_UP_BUCKET_ORDER,
+    FUNNEL_STAGE_ORDER,
+    STATUS_COLOR_DOMAIN,
+    STATUS_COLOR_RANGE,
+    STATUS_DISPLAY_ORDER,
+    build_fit_outcome_df,
+    build_follow_up_timeline_df,
+    build_pipeline_funnel_df,
+    build_resume_performance_df,
+    build_weekly_activity_df,
+    build_weekly_momentum_summary,
+)
 from outreach_guardrails import (
     build_outreach_tracker_row,
     classify_outreach_thread,
@@ -1127,6 +1141,29 @@ def priority_rank(priority: str) -> int:
         "Low priority": 1,
     }
     return mapping.get((priority or "").strip(), 0)
+
+
+def style_dashboard_chart(chart: alt.Chart, *, height: int = 260) -> alt.Chart:
+    return (
+        chart.properties(height=height)
+        .configure_view(strokeOpacity=0)
+        .configure_axis(
+            labelColor="#cbd5e1",
+            titleColor="#e2e8f0",
+            gridColor="rgba(148,163,184,0.14)",
+            domainColor="rgba(148,163,184,0.16)",
+            tickColor="rgba(148,163,184,0.16)",
+            labelFontSize=12,
+            titleFontSize=12,
+        )
+        .configure_legend(
+            labelColor="#cbd5e1",
+            titleColor="#e2e8f0",
+            orient="top",
+            padding=6,
+        )
+        .configure_title(color="#f8fafc", fontSize=14, anchor="start")
+    )
 
 
 def _query_param_str(name: str) -> str:
@@ -3246,6 +3283,12 @@ with tabs[2]:
     st.markdown("#### 📊 Overview")
     fit_numeric = pd.to_numeric(df.get("Fit Score", pd.Series([], dtype=str)), errors="coerce")
     avg_fit = round(float(fit_numeric.dropna().mean()), 1) if fit_numeric.notna().any() else None
+    weekly_momentum = build_weekly_momentum_summary(df, today=today)
+    weekly_activity_df = build_weekly_activity_df(df, today=today, weeks=8)
+    funnel_df = build_pipeline_funnel_df(df)
+    fit_outcome_df = build_fit_outcome_df(df)
+    resume_performance_df = build_resume_performance_df(df)
+    follow_up_timeline_df = build_follow_up_timeline_df(df, today=today)
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Total", len(df))
     m2.metric("Applied", int((df["Status"].astype(str) == "Applied").sum()))
@@ -3253,6 +3296,199 @@ with tabs[2]:
     m4.metric("Offers", int((df["Status"].astype(str) == "Offer").sum()))
     m5.metric("Overdue", overdue_count)
     m6.metric("Avg fit", avg_fit if avg_fit is not None else "—")
+
+    st.markdown("#### ⚡ Weekly momentum")
+    week_label = f"{weekly_momentum['week_start']} to {weekly_momentum['week_end']}"
+    st.caption(f"Current week window: {week_label}")
+    week_delta = weekly_momentum["applications_this_week"] - weekly_momentum["applications_last_week"]
+    followup_delta = weekly_momentum["followups_this_week"] - weekly_momentum["followups_last_week"]
+    wm1, wm2, wm3, wm4 = st.columns(4)
+    wm1.metric("Applied this week", weekly_momentum["applications_this_week"], delta=f"{week_delta:+d} vs last week")
+    wm2.metric("Follow-ups due this week", weekly_momentum["followups_this_week"], delta=f"{followup_delta:+d} vs last week")
+    wm3.metric("Interviews active", weekly_momentum["interviews_active"])
+    wm4.metric("Offers total", weekly_momentum["offers_total"])
+
+    weekly_area = alt.Chart(weekly_activity_df).mark_area(
+        line={"color": "#7c8cff"},
+        color=alt.Gradient(
+            gradient="linear",
+            stops=[
+                alt.GradientStop(color="#7c8cff", offset=0),
+                alt.GradientStop(color="rgba(124,140,255,0.08)", offset=1),
+            ],
+            x1=1,
+            x2=1,
+            y1=1,
+            y2=0,
+        ),
+    ).encode(
+        x=alt.X("Week Start:T", title="Week"),
+        y=alt.Y("Applications:Q", title="Applications"),
+        tooltip=[
+            alt.Tooltip("Week Label:N", title="Week of"),
+            alt.Tooltip("Applications:Q", title="Applications"),
+        ],
+    )
+    weekly_points = alt.Chart(weekly_activity_df).mark_circle(size=90, color="#42c8ff").encode(
+        x="Week Start:T",
+        y="Applications:Q",
+        tooltip=[
+            alt.Tooltip("Week Label:N", title="Week of"),
+            alt.Tooltip("Applications:Q", title="Applications"),
+        ],
+    )
+    st.altair_chart(style_dashboard_chart(weekly_area + weekly_points, height=220), use_container_width=True)
+
+    st.markdown("#### 🧭 Pipeline health")
+    health_left, health_right = st.columns([1.05, 0.95])
+    with health_left:
+        funnel_max = max(int(funnel_df["Count"].max()), 1)
+        funnel_base = alt.Chart(funnel_df).encode(
+            y=alt.Y("Stage:N", sort=FUNNEL_STAGE_ORDER, title=None),
+            x=alt.X(
+                "Count:Q",
+                title="Opportunities",
+                scale=alt.Scale(domain=[0, funnel_max * 1.25]),
+            ),
+            color=alt.Color(
+                "Stage:N",
+                scale=alt.Scale(domain=FUNNEL_STAGE_ORDER, range=STATUS_COLOR_RANGE[: len(FUNNEL_STAGE_ORDER)]),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Stage:N", title="Stage"),
+                alt.Tooltip("Count:Q", title="Count"),
+                alt.Tooltip("Conversion Label:N", title="Conversion"),
+            ],
+        )
+        funnel_chart = funnel_base.mark_bar(cornerRadiusEnd=8, size=26)
+        funnel_labels = funnel_base.mark_text(
+            align="left",
+            baseline="middle",
+            dx=8,
+            color="#e2e8f0",
+            fontWeight="bold",
+        ).encode(text="Label:N")
+        st.altair_chart(style_dashboard_chart(funnel_chart + funnel_labels, height=250), use_container_width=True)
+        applied_count = int(funnel_df.loc[funnel_df["Stage"] == "Applied", "Count"].iloc[0]) if not funnel_df.empty else 0
+        interview_count = int(funnel_df.loc[funnel_df["Stage"] == "Interview", "Count"].iloc[0]) if not funnel_df.empty else 0
+        applied_to_interview = round((interview_count / applied_count) * 100, 1) if applied_count else 0.0
+        st.caption(f"Applied to interview conversion in the current tracker: {applied_to_interview}%.")
+
+    with health_right:
+        timeline_chart = alt.Chart(follow_up_timeline_df).mark_bar(cornerRadiusEnd=8, size=28).encode(
+            y=alt.Y("Bucket:N", sort=FOLLOW_UP_BUCKET_ORDER, title=None),
+            x=alt.X("Count:Q", title="Jobs"),
+            color=alt.Color(
+                "Bucket:N",
+                scale=alt.Scale(domain=FOLLOW_UP_BUCKET_ORDER, range=FOLLOW_UP_BUCKET_COLORS),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Bucket:N", title="Window"),
+                alt.Tooltip("Count:Q", title="Jobs"),
+            ],
+        )
+        timeline_labels = alt.Chart(follow_up_timeline_df).mark_text(
+            align="left",
+            baseline="middle",
+            dx=8,
+            color="#e2e8f0",
+            fontWeight="bold",
+        ).encode(
+            y=alt.Y("Bucket:N", sort=FOLLOW_UP_BUCKET_ORDER),
+            x="Count:Q",
+            text="Count:Q",
+        )
+        st.altair_chart(style_dashboard_chart(timeline_chart + timeline_labels, height=250), use_container_width=True)
+        next_seven_days = int(
+            follow_up_timeline_df[
+                follow_up_timeline_df["Bucket"].isin(["Overdue", "Today", "Next 3 days", "Next 7 days"])
+            ]["Count"].sum()
+        )
+        st.caption(f"{next_seven_days} opportunity(ies) need follow-up attention in the next 7 days.")
+
+    st.markdown("#### 📈 Performance insights")
+    perf_left, perf_right = st.columns(2)
+    with perf_left:
+        if fit_outcome_df.empty:
+            st.caption("Fit score analytics will appear once rows contain fit scores.")
+        else:
+            mean_fit_score = round(float(fit_outcome_df["Fit Score"].mean()), 1)
+            fit_rule = alt.Chart(pd.DataFrame({"Fit Score": [mean_fit_score]})).mark_rule(
+                color="#94a3b8",
+                strokeDash=[6, 4],
+            ).encode(x="Fit Score:Q")
+            fit_points = alt.Chart(fit_outcome_df).mark_circle(
+                opacity=0.82,
+                stroke="#081326",
+                strokeWidth=0.8,
+            ).encode(
+                x=alt.X("Fit Score:Q", scale=alt.Scale(domain=[0, 100]), title="Fit score"),
+                y=alt.Y("Status:N", sort=STATUS_DISPLAY_ORDER, title="Current stage"),
+                color=alt.Color(
+                    "Status:N",
+                    scale=alt.Scale(domain=STATUS_COLOR_DOMAIN, range=STATUS_COLOR_RANGE),
+                    legend=alt.Legend(title=None),
+                ),
+                size=alt.Size("Priority Score:Q", scale=alt.Scale(domain=[1, 4], range=[80, 260]), legend=None),
+                tooltip=[
+                    alt.Tooltip("Company:N", title="Company"),
+                    alt.Tooltip("Role:N", title="Role"),
+                    alt.Tooltip("Status:N", title="Status"),
+                    alt.Tooltip("Fit Score:Q", title="Fit score", format=".1f"),
+                    alt.Tooltip("Priority:N", title="Priority"),
+                ],
+            )
+            st.altair_chart(style_dashboard_chart(fit_rule + fit_points, height=320), use_container_width=True)
+            progressed = fit_outcome_df[fit_outcome_df["Status"].isin(["Interview", "Offer"])]
+            if not progressed.empty:
+                progressed_avg_fit = round(float(progressed["Fit Score"].mean()), 1)
+                st.caption(f"Interview and offer stage roles currently average a {progressed_avg_fit} fit score.")
+            else:
+                st.caption(f"Average tracked fit score: {mean_fit_score}.")
+
+    with perf_right:
+        if resume_performance_df.empty:
+            st.caption("Resume performance will appear once applications are logged with a resume name.")
+        else:
+            resume_long = resume_performance_df.melt(
+                id_vars=["Resume", "Interview Rate"],
+                value_vars=["Applications", "Interviews", "Offers"],
+                var_name="Metric",
+                value_name="Count",
+            )
+            ordered_resumes = resume_performance_df["Resume"].tolist()
+            resume_chart = alt.Chart(resume_long).mark_bar(cornerRadiusEnd=7).encode(
+                x=alt.X("Count:Q", title="Count"),
+                y=alt.Y("Resume:N", sort=ordered_resumes, title=None),
+                yOffset=alt.YOffset("Metric:N"),
+                color=alt.Color(
+                    "Metric:N",
+                    scale=alt.Scale(
+                        domain=["Applications", "Interviews", "Offers"],
+                        range=["#7c8cff", "#42c8ff", "#38d7c1"],
+                    ),
+                ),
+                tooltip=[
+                    alt.Tooltip("Resume:N", title="Resume"),
+                    alt.Tooltip("Metric:N", title="Metric"),
+                    alt.Tooltip("Count:Q", title="Count"),
+                    alt.Tooltip("Interview Rate:Q", title="Interview rate", format=".1f"),
+                ],
+            )
+            resume_chart_height = max(220, len(ordered_resumes) * 56)
+            st.altair_chart(style_dashboard_chart(resume_chart, height=resume_chart_height), use_container_width=True)
+            reliable_resumes = resume_performance_df[resume_performance_df["Applications"] >= 2].copy()
+            best_resume_row = (
+                reliable_resumes.sort_values(["Interview Rate", "Applications"], ascending=[False, False]).iloc[0]
+                if not reliable_resumes.empty
+                else resume_performance_df.iloc[0]
+            )
+            st.caption(
+                f"Strongest tracked resume so far: {best_resume_row['Resume']} "
+                f"({best_resume_row['Interview Rate']}% interview rate across {best_resume_row['Applications']} applications)."
+            )
 
     st.markdown("#### 🚀 Top Opportunities")
 
@@ -3285,55 +3521,28 @@ with tabs[2]:
                 unsafe_allow_html=True,
             )
 
-    st.markdown("#### 📈 Trends")
-
-    status_counts = df["Status"].fillna("").astype(str).replace("", "Unknown").value_counts().reset_index()
-    status_counts.columns = ["Status", "Count"]
-
-    st.altair_chart(
-        alt.Chart(status_counts)
-        .mark_bar()
-        .encode(x=alt.X("Status:N", sort="-y"), y="Count:Q", tooltip=["Status", "Count"]),
-        use_container_width=True,
-    )
-
-    tmp = df.copy()
-    tmp["Date Applied"] = pd.to_datetime(tmp["Date Applied"], errors="coerce")
-    tmp = tmp.dropna(subset=["Date Applied"])
-    if not tmp.empty:
-        daily = tmp.groupby(tmp["Date Applied"].dt.date).size().reset_index(name="Count")
-        daily.columns = ["Date", "Count"]
-        st.altair_chart(
-            alt.Chart(daily)
-            .mark_line(point=True)
-            .encode(x="Date:T", y="Count:Q", tooltip=["Date", "Count"]),
-            use_container_width=True,
-        )
-
     with st.expander("🧠 Pipeline insights", expanded=False):
         active_statuses = {"Interested", "Applied", "OA", "Interview"}
         active_count = int(df["Status"].astype(str).isin(active_statuses).sum())
         interview_like = int(df["Status"].astype(str).isin({"Interview", "Offer"}).sum())
         applied_like = int(df["Status"].astype(str).isin({"Applied", "OA", "Interview", "Offer", "Rejected", "Ghosted"}).sum())
         conversion_rate = round((interview_like / applied_like) * 100, 1) if applied_like else 0
-        i1, i2, i3 = st.columns(3)
+        i1, i2, i3, i4 = st.columns(4)
         i1.metric("Active pipeline", active_count)
         i2.metric("Interview / offer rate", f"{conversion_rate}%")
         i3.metric("Follow-ups due", due_today_count + overdue_count)
+        i4.metric("Applications this week", weekly_momentum["applications_this_week"])
 
-        resume_series = df.get("Resume Used", pd.Series([], dtype=str)).fillna("").astype(str)
-        resume_counts = resume_series[resume_series.str.strip() != ""].value_counts().reset_index()
-        if not resume_counts.empty:
-            resume_counts.columns = ["Resume", "Applications"]
-            st.altair_chart(
-                alt.Chart(resume_counts)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Applications:Q"),
-                    y=alt.Y("Resume:N", sort="-x"),
-                    tooltip=["Resume", "Applications"],
-                ),
-                use_container_width=True,
+        if not resume_performance_df.empty:
+            reliable_resumes = resume_performance_df[resume_performance_df["Applications"] >= 2].copy()
+            best_resume_row = (
+                reliable_resumes.sort_values(["Interview Rate", "Applications"], ascending=[False, False]).iloc[0]
+                if not reliable_resumes.empty
+                else resume_performance_df.iloc[0]
+            )
+            st.caption(
+                f"Best performing resume in the tracker: {best_resume_row['Resume']} "
+                f"with an interview rate of {best_resume_row['Interview Rate']}%."
             )
         else:
             st.caption("Resume usage insights will appear once applications are logged with an active resume.")

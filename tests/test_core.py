@@ -28,6 +28,14 @@ from company_discovery import (
     source_label_from_url,
     sponsorship_signal_for_company,
 )
+from dashboard_metrics import (
+    build_fit_outcome_df,
+    build_follow_up_timeline_df,
+    build_pipeline_funnel_df,
+    build_resume_performance_df,
+    build_weekly_activity_df,
+    build_weekly_momentum_summary,
+)
 from db_store import merge_visible_tracker_edits
 from gmail_sender import GMAIL_CONNECT_SCOPES, GmailSender
 from hunter_helper import HunterClient
@@ -77,6 +85,109 @@ class TrackerEditMergeTests(unittest.TestCase):
         merged = merge_visible_tracker_edits(original, edited_visible, {"r1"})
 
         self.assertEqual(merged["_row_id"].tolist(), ["r2"])
+
+
+class DashboardMetricTests(unittest.TestCase):
+    def setUp(self):
+        self.df = pd.DataFrame(
+            [
+                {
+                    "Company": "Acme",
+                    "Role": "Data Analyst Intern",
+                    "Status": "Interested",
+                    "Date Applied": "2026-04-07",
+                    "Follow-up Date": "2026-04-14",
+                    "Fit Score": "82",
+                    "Priority": "Apply now",
+                    "Resume Used": "Analytics Resume",
+                },
+                {
+                    "Company": "Beta",
+                    "Role": "Data Engineer Intern",
+                    "Status": "Applied",
+                    "Date Applied": "2026-04-08",
+                    "Follow-up Date": "2026-04-10",
+                    "Fit Score": "74",
+                    "Priority": "Strong consider",
+                    "Resume Used": "Data Resume",
+                },
+                {
+                    "Company": "Core",
+                    "Role": "Analytics Engineer Intern",
+                    "Status": "Interview",
+                    "Date Applied": "2026-04-01",
+                    "Follow-up Date": "2026-04-09",
+                    "Fit Score": "91",
+                    "Priority": "Apply now",
+                    "Resume Used": "Data Resume",
+                },
+                {
+                    "Company": "Delta",
+                    "Role": "BI Analyst",
+                    "Status": "Offer",
+                    "Date Applied": "2026-03-30",
+                    "Follow-up Date": "2026-04-15",
+                    "Fit Score": "88",
+                    "Priority": "Apply now",
+                    "Resume Used": "Analytics Resume",
+                },
+                {
+                    "Company": "Echo",
+                    "Role": "Product Analyst",
+                    "Status": "Rejected",
+                    "Date Applied": "2026-04-05",
+                    "Follow-up Date": "2026-04-05",
+                    "Fit Score": "55",
+                    "Priority": "Low priority",
+                    "Resume Used": "Analytics Resume",
+                },
+            ]
+        )
+
+    def test_pipeline_funnel_counts_stages_in_order(self):
+        funnel = build_pipeline_funnel_df(self.df)
+
+        self.assertEqual(funnel["Stage"].tolist(), ["Interested", "Applied", "OA", "Interview", "Offer"])
+        self.assertEqual(funnel["Count"].tolist(), [1, 1, 0, 1, 1])
+
+    def test_weekly_momentum_summary_uses_current_week(self):
+        summary = build_weekly_momentum_summary(self.df, today=date(2026, 4, 10))
+
+        self.assertEqual(summary["applications_this_week"], 2)
+        self.assertEqual(summary["followups_this_week"], 2)
+        self.assertEqual(summary["interviews_active"], 1)
+        self.assertEqual(summary["offers_total"], 1)
+
+    def test_weekly_activity_fills_missing_weeks(self):
+        activity = build_weekly_activity_df(self.df, today=date(2026, 4, 10), weeks=4)
+
+        self.assertEqual(len(activity), 4)
+        self.assertEqual(int(activity["Applications"].sum()), 5)
+
+    def test_fit_outcome_df_builds_stage_depth_and_priority_score(self):
+        fit_df = build_fit_outcome_df(self.df)
+        interview_row = fit_df.loc[fit_df["Company"] == "Core"].iloc[0]
+
+        self.assertEqual(interview_row["Stage Depth"], 4)
+        self.assertEqual(interview_row["Priority Score"], 4)
+
+    def test_resume_performance_summary_counts_interviews_and_offers(self):
+        resume_df = build_resume_performance_df(self.df)
+        data_resume = resume_df.loc[resume_df["Resume"] == "Data Resume"].iloc[0]
+
+        self.assertEqual(int(data_resume["Applications"]), 2)
+        self.assertEqual(int(data_resume["Interviews"]), 1)
+        self.assertEqual(int(data_resume["Offers"]), 0)
+        self.assertEqual(float(data_resume["Interview Rate"]), 50.0)
+
+    def test_follow_up_timeline_groups_dates_into_buckets(self):
+        timeline = build_follow_up_timeline_df(self.df, today=date(2026, 4, 10))
+        counts = {row["Bucket"]: int(row["Count"]) for _, row in timeline.iterrows()}
+
+        self.assertEqual(counts["Overdue"], 1)
+        self.assertEqual(counts["Today"], 1)
+        self.assertEqual(counts["Next 3 days"], 0)
+        self.assertEqual(counts["Next 7 days"], 1)
 
 
 class AuthValidationTests(unittest.TestCase):
