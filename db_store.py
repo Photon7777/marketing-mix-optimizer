@@ -24,42 +24,10 @@ TEXT_COLS = [
     "Notes",
 ]
 
-OUTREACH_TEXT_COLS = [
-    "Date",
-    "Company",
-    "Role",
-    "Location",
-    "Status",
-    "Reply Status",
-    "Resume Used",
-    "Follow-up Date",
-    "Next Follow-up At",
-    "Contact Name",
-    "Contact Link",
-    "Email",
-    "Subject",
-    "Personalization",
-    "Sponsorship Signal",
-    "Send Source",
-    "Role Source URL",
-    "Gmail Message ID",
-    "Gmail Thread ID",
-    "Last Reply At",
-    "Last Reply From",
-    "Last Reply Snippet",
-    "Last Synced At",
-    "Sequence Step",
-    "Paused Reason",
-    "Suggested Action",
-    "Suggested Follow-up",
-    "Suggestion Updated At",
-    "Notes",
-]
-
 
 def init_db() -> None:
     """
-    Creates tables used by the app (applications + outreach + resumes).
+    Creates tables used by the app (applications + resumes).
     NOTE: users table is created by auth.py, but we keep admin_list_users resilient.
     """
     with get_conn() as conn:
@@ -96,69 +64,6 @@ def init_db() -> None:
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Priority" TEXT;')
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Fit Summary" TEXT;')
             cur.execute('ALTER TABLE applications ADD COLUMN IF NOT EXISTS "Resume Used" TEXT;')
-
-            # Outreach tracker
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS outreach_tracker (
-                    _row_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    "Date" TEXT,
-                    "Company" TEXT,
-                    "Role" TEXT,
-                    "Location" TEXT,
-                    "Status" TEXT,
-                    "Reply Status" TEXT,
-                    "Resume Used" TEXT,
-                    "Follow-up Date" TEXT,
-                    "Next Follow-up At" TEXT,
-                    "Contact Name" TEXT,
-                    "Contact Link" TEXT,
-                    "Email" TEXT,
-                    "Subject" TEXT,
-                    "Personalization" TEXT,
-                    "Sponsorship Signal" TEXT,
-                    "Send Source" TEXT,
-                    "Role Source URL" TEXT,
-                    "Gmail Message ID" TEXT,
-                    "Gmail Thread ID" TEXT,
-                    "Last Reply At" TEXT,
-                    "Last Reply From" TEXT,
-                    "Last Reply Snippet" TEXT,
-                    "Last Synced At" TEXT,
-                    "Sequence Step" TEXT,
-                    "Paused Reason" TEXT,
-                    "Suggested Action" TEXT,
-                    "Suggested Follow-up" TEXT,
-                    "Suggestion Updated At" TEXT,
-                    "Notes" TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-                """
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_outreach_user_id ON outreach_tracker(user_id);")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_outreach_created_at ON outreach_tracker(created_at);")
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Resume Used" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Reply Status" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Next Follow-up At" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Personalization" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Sponsorship Signal" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Send Source" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Role Source URL" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Gmail Message ID" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Gmail Thread ID" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Last Reply At" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Last Reply From" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Last Reply Snippet" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Last Synced At" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Sequence Step" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Paused Reason" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Suggested Action" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Suggested Follow-up" TEXT;')
-            cur.execute('ALTER TABLE outreach_tracker ADD COLUMN IF NOT EXISTS "Suggestion Updated At" TEXT;')
-            cur.execute('CREATE INDEX IF NOT EXISTS idx_outreach_thread_id ON outreach_tracker ("Gmail Thread ID");')
-            cur.execute('CREATE INDEX IF NOT EXISTS idx_outreach_reply_status ON outreach_tracker ("Reply Status");')
-            cur.execute('CREATE INDEX IF NOT EXISTS idx_outreach_followup_at ON outreach_tracker ("Next Follow-up At");')
 
             # Resume versions library
             cur.execute(
@@ -294,118 +199,6 @@ def append_row(user_id: str, row: Dict) -> None:
         conn.commit()
 
 
-def read_outreach_tracker_df(user_id: str) -> pd.DataFrame:
-    init_db()
-
-    query = """
-        SELECT
-            _row_id,
-            "Date","Company","Role","Location","Status","Reply Status","Resume Used",
-            "Follow-up Date","Next Follow-up At","Contact Name","Contact Link","Email","Subject",
-            "Personalization","Sponsorship Signal","Send Source","Role Source URL",
-            "Gmail Message ID","Gmail Thread ID","Last Reply At","Last Reply From",
-            "Last Reply Snippet","Last Synced At","Sequence Step","Paused Reason",
-            "Suggested Action","Suggested Follow-up","Suggestion Updated At","Notes"
-        FROM outreach_tracker
-        WHERE user_id = %s
-        ORDER BY created_at DESC
-    """
-
-    with get_conn() as conn:
-        df = pd.read_sql_query(query, conn, params=(user_id,))
-
-    if df.empty:
-        return pd.DataFrame(columns=["_row_id"] + OUTREACH_TEXT_COLS)
-
-    df = _normalize_with_cols(df, OUTREACH_TEXT_COLS)
-    df = ensure_row_ids(df)
-    return df
-
-
-def append_outreach_row(user_id: str, row: Dict) -> None:
-    init_db()
-    row_id = str(uuid.uuid4())
-    values = {c: str(row.get(c, "") or "") for c in OUTREACH_TEXT_COLS}
-
-    sql = """
-        INSERT INTO outreach_tracker (
-            _row_id, user_id,
-            "Date","Company","Role","Location","Status","Reply Status","Resume Used",
-            "Follow-up Date","Next Follow-up At","Contact Name","Contact Link","Email","Subject",
-            "Personalization","Sponsorship Signal","Send Source","Role Source URL",
-            "Gmail Message ID","Gmail Thread ID","Last Reply At","Last Reply From",
-            "Last Reply Snippet","Last Synced At","Sequence Step","Paused Reason",
-            "Suggested Action","Suggested Follow-up","Suggestion Updated At","Notes"
-        )
-        VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-        )
-    """
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                sql,
-                (
-                    row_id,
-                    user_id,
-                    values["Date"],
-                    values["Company"],
-                    values["Role"],
-                    values["Location"],
-                    values["Status"],
-                    values["Reply Status"],
-                    values["Resume Used"],
-                    values["Follow-up Date"],
-                    values["Next Follow-up At"],
-                    values["Contact Name"],
-                    values["Contact Link"],
-                    values["Email"],
-                    values["Subject"],
-                    values["Personalization"],
-                    values["Sponsorship Signal"],
-                    values["Send Source"],
-                    values["Role Source URL"],
-                    values["Gmail Message ID"],
-                    values["Gmail Thread ID"],
-                    values["Last Reply At"],
-                    values["Last Reply From"],
-                    values["Last Reply Snippet"],
-                    values["Last Synced At"],
-                    values["Sequence Step"],
-                    values["Paused Reason"],
-                    values["Suggested Action"],
-                    values["Suggested Follow-up"],
-                    values["Suggestion Updated At"],
-                    values["Notes"],
-                ),
-            )
-        conn.commit()
-
-
-def update_outreach_row(user_id: str, row_id: str, updates: Dict) -> None:
-    init_db()
-    safe_updates = {
-        key: str(value or "")
-        for key, value in (updates or {}).items()
-        if key in OUTREACH_TEXT_COLS
-    }
-    if not safe_updates:
-        return
-
-    assignments = ", ".join(f'"{column}" = %s' for column in safe_updates.keys())
-    sql = f"""
-        UPDATE outreach_tracker
-        SET {assignments}
-        WHERE user_id = %s AND _row_id = %s
-    """
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, [*safe_updates.values(), user_id, row_id])
-        conn.commit()
-
 
 def overwrite_tracker_for_user(user_id: str, df: pd.DataFrame) -> None:
     """
@@ -511,7 +304,6 @@ def delete_all_for_user(user_id: str) -> None:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM applications WHERE user_id = %s", (user_id,))
-            cur.execute("DELETE FROM outreach_tracker WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM resumes WHERE user_id = %s", (user_id,))
         conn.commit()
 

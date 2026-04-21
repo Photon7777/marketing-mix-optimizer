@@ -2,20 +2,15 @@
 
 AI-powered career operations app for internship and early-career job search workflows.
 
-NextRole helps users choose the best resume version, analyze fit against a job post, generate tailored application materials, manage a private application tracker, and run recruiter outreach campaigns.
+NextRole helps users choose the best resume version, analyze fit against a job post, generate tailored application materials, and manage a private application tracker.
 
 ## Features
 
 - Secure login, signup, password change, and account deletion with bcrypt hashing.
 - Per-user Postgres tracker for applications, statuses, priorities, fit scores, follow-ups, contacts, notes, and resume used.
-- Resume library with extracted text plus original file storage for email attachments.
+- Resume library with extracted text plus original file storage.
 - Job fit scoring and resume-version recommendations.
 - AI-generated application pack with role summary, gaps, tailored resume bullets, cover letter paragraph, networking message, and interview talking points.
-- Cold outreach workflows for individual contacts, bulk campaigns, role-based web company discovery, startup/open-role discovery, and explicit daily discovery runs.
-- Company-specific outreach drafting so each recipient can receive a niche message based on company context, recipient title, role target, and resume highlights.
-- Sponsorship signal columns with conservative historical H-1B sponsor lookup hints; users should verify current role-level sponsorship before applying.
-- Gmail sending with optional resume attachment.
-- Hunter contact discovery with local contact ranking.
 - CSV and Excel export, CSV import, de-duplication, inline editing, and admin read-only overview.
 - Pipeline insights for active pipeline, interview/offer rate, follow-up pressure, and resume usage.
 
@@ -29,8 +24,6 @@ NextRole helps users choose the best resume version, analyze fit against a job p
 |-- autofill.py         # Job field extraction
 |-- db.py               # Postgres connection helper
 |-- db_store.py         # Tracker and resume persistence
-|-- gmail_sender.py     # Gmail API sender
-|-- hunter_helper.py    # Hunter API client and contact ranking
 |-- tools.py            # Fit scoring, job fetch, resume ranking helpers
 |-- requirements.txt
 `-- tests/
@@ -49,12 +42,7 @@ Create `.env` locally or configure Streamlit secrets with the required values:
 ```bash
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4o-mini
-OPENAI_OUTREACH_MODEL=gpt-4o-mini
 DATABASE_URL=postgresql://...
-HUNTER_API_KEY=...
-GMAIL_CLIENT_SECRET_FILE=/absolute/path/to/client_secret.json
-GMAIL_OAUTH_REDIRECT_URI=http://localhost:8501
-GMAIL_TOKEN_ENCRYPTION_KEY=replace-with-a-long-secret
 ```
 
 Optional Streamlit secrets:
@@ -62,7 +50,6 @@ Optional Streamlit secrets:
 ```toml
 admin_users = ["your_username"]
 DATABASE_URL = "postgresql://..."
-HUNTER_API_KEY = "..."
 ```
 
 Run the app:
@@ -74,18 +61,15 @@ streamlit run app.py
 ## Deployment Notes
 
 - Use Postgres-compatible storage such as Neon, Render Postgres, Railway Postgres, or Supabase Postgres.
-- Store `DATABASE_URL`, `OPENAI_API_KEY`, `HUNTER_API_KEY`, `GMAIL_CLIENT_SECRET_FILE`, `GMAIL_OAUTH_REDIRECT_URI`, and `GMAIL_TOKEN_ENCRYPTION_KEY` in deployment secrets.
-- `HunterClient` now reads `HUNTER_API_KEY` from either environment variables or Streamlit secrets, which is important for Streamlit Cloud deployments.
-- Do not commit `.env`, Streamlit secrets, Gmail tokens, Google client-secret JSON files, local DB files, or runtime tracker artifacts.
-- Each app user now connects their own Gmail account from Account settings, and the encrypted OAuth token is stored in Postgres.
-- The redirect URI configured in Google Cloud must match `GMAIL_OAUTH_REDIRECT_URI`.
+- Store `DATABASE_URL` and `OPENAI_API_KEY` in deployment secrets.
+- Do not commit `.env`, Streamlit secrets, local DB files, or runtime tracker artifacts.
 
 ## Verification
 
 Run a syntax check:
 
 ```bash
-venv/bin/python -m py_compile app.py agent.py auth.py autofill.py db.py db_store.py tools.py gmail_sender.py hunter_helper.py
+venv/bin/python -m py_compile app.py agent.py auth.py autofill.py db.py db_store.py tools.py
 ```
 
 Run unit tests:
@@ -98,6 +82,4 @@ venv/bin/python -m unittest discover -s tests
 
 - Passwords are hashed with bcrypt.
 - Tracker and resume data is scoped by `user_id`.
-- Per-user Gmail OAuth tokens are encrypted before storage in Postgres.
 - Destructive account deletion verifies the password before wiping tracker/resume data.
-- OAuth/client-secret files are ignored by Git; rotate credentials if they were ever exposed.

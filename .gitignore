@@ -14,10 +14,8 @@ venv/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local OAuth / API credentials
-gmail_token.json
+# Local API credentials
 *token*.json
-client_secret*.json
 *_secret*.json
 credentials*.json
 

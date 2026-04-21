@@ -232,7 +232,7 @@ def recommend_follow_up_action(
                 return "Send follow-up now"
             if follow_dt == today:
                 return "Follow up today"
-        return "Wait or prepare outreach"
+        return "Wait and prepare next application step"
 
     if status_clean == "OA":
         return "Complete assessment / prepare for next round"
