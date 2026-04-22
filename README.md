@@ -69,7 +69,6 @@ new_customers
 |-- mmx_app.py                      # Streamlit Mixalyzer product
 |-- requirements.txt
 `-- tests/
-    |-- test_core.py
     `-- test_marketing_mix_model.py
 ```
 
