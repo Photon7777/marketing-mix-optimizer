@@ -83,6 +83,9 @@ class MarketingMixModel:
     date_origin: pd.Timestamp
     date_span_days: int
     metrics: Dict[str, float]
+    model_kind: str = "Ridge MMM"
+    posterior_covariance: np.ndarray | None = None
+    residual_std: float | None = None
 
     def predict(self, data: pd.DataFrame | Mapping[str, object]) -> np.ndarray:
         frame = pd.DataFrame([data]) if isinstance(data, Mapping) else data.copy()
@@ -103,6 +106,17 @@ class MarketingMixModel:
         return np.maximum(predictions.astype(float), 0.0)
 
 
+FIELD_LABELS: Dict[str, str] = {
+    DATE_COL: "Date",
+    TARGET_COL: "Revenue",
+    CUSTOMER_COL: "New Customers",
+    **CHANNEL_LABELS,
+}
+
+REQUIRED_MODEL_COLUMNS = (DATE_COL, TARGET_COL, *DEFAULT_CHANNELS)
+OPTIONAL_MODEL_COLUMNS = (CUSTOMER_COL,)
+
+
 def normalize_marketing_data(data: pd.DataFrame) -> pd.DataFrame:
     """Return a copy with common marketing-mix column names normalized."""
     rename_map: Dict[str, str] = {}
@@ -115,7 +129,130 @@ def normalize_marketing_data(data: pd.DataFrame) -> pd.DataFrame:
             rename_map[column] = target
             seen_targets.add(target)
 
-    return data.rename(columns=rename_map).copy()
+    frame = data.rename(columns=rename_map).copy()
+    return frame.loc[:, ~frame.columns.duplicated(keep="last")]
+
+
+def suggest_column_mapping(data: pd.DataFrame) -> Dict[str, str]:
+    """Suggest source columns for the canonical Mixalyzer schema."""
+    mapping: Dict[str, str] = {}
+    used: set[str] = set()
+    normalized_columns = {column: _normalize_column_name(column) for column in data.columns}
+
+    for canonical in (*REQUIRED_MODEL_COLUMNS, *OPTIONAL_MODEL_COLUMNS):
+        best_column = ""
+        best_score = 0
+        for column, normalized in normalized_columns.items():
+            if column in used:
+                continue
+            score = _column_match_score(canonical, normalized)
+            if score > best_score:
+                best_column = column
+                best_score = score
+        if best_score >= 3:
+            mapping[canonical] = best_column
+            used.add(best_column)
+        else:
+            mapping[canonical] = ""
+
+    return mapping
+
+
+def apply_column_mapping(data: pd.DataFrame, mapping: Mapping[str, str]) -> pd.DataFrame:
+    """Copy selected source columns into the canonical schema used by the model."""
+    frame = data.copy()
+    copied_sources = []
+    for canonical, source in mapping.items():
+        if source and source in data.columns:
+            frame[canonical] = data[source]
+            if source != canonical:
+                copied_sources.append(source)
+    frame = frame.drop(columns=copied_sources, errors="ignore")
+    return frame
+
+
+def assess_data_readiness(
+    data: pd.DataFrame,
+    channel_cols: Sequence[str] = DEFAULT_CHANNELS,
+) -> Dict[str, object]:
+    """Score whether a dataset is ready for MMM modeling and explain blockers."""
+    frame = normalize_marketing_data(data)
+    checks = []
+    score = 100
+
+    def add_check(area: str, status: str, detail: str, penalty: int = 0) -> None:
+        nonlocal score
+        score -= penalty
+        checks.append({"Area": area, "Status": status, "Detail": detail})
+
+    missing = [column for column in (DATE_COL, TARGET_COL, *channel_cols) if column not in frame.columns]
+    if missing:
+        add_check("Required columns", "Needs attention", f"Missing: {', '.join(missing)}", 12 * len(missing))
+    else:
+        add_check("Required columns", "Ready", "Date, revenue, and channel spend fields are mapped.")
+
+    if DATE_COL in frame.columns:
+        parsed_dates = pd.to_datetime(frame[DATE_COL], errors="coerce")
+        invalid_dates = int(parsed_dates.isna().sum())
+        duplicate_dates = int(parsed_dates.duplicated().sum())
+        if invalid_dates:
+            add_check("Date quality", "Needs attention", f"{invalid_dates} invalid date value(s).", 15)
+        elif duplicate_dates:
+            add_check("Date quality", "Watch", f"{duplicate_dates} duplicate date value(s).", 5)
+        else:
+            add_check("Date quality", "Ready", "Dates parse cleanly with no duplicates.")
+    else:
+        add_check("Date quality", "Needs attention", "No mapped date column.", 15)
+
+    row_count = len(frame)
+    if row_count >= 104:
+        add_check("History length", "Ready", f"{row_count} observations; enough for seasonality and holdout testing.")
+    elif row_count >= 52:
+        add_check("History length", "Watch", f"{row_count} observations; usable, but two years is stronger.", 8)
+    else:
+        add_check("History length", "Needs attention", f"{row_count} observations; MMM works better with 52+ weekly rows.", 15)
+
+    numeric_columns = [column for column in (TARGET_COL, *channel_cols) if column in frame.columns]
+    numeric_issues = []
+    for column in numeric_columns:
+        numeric = pd.to_numeric(frame[column], errors="coerce")
+        bad_values = int(numeric.isna().sum())
+        negative_values = int((numeric < 0).sum())
+        if bad_values or negative_values:
+            numeric_issues.append(f"{column}: {bad_values} non-numeric, {negative_values} negative")
+    if numeric_issues:
+        add_check("Numeric quality", "Needs attention", "; ".join(numeric_issues), 10)
+    else:
+        add_check("Numeric quality", "Ready", "Revenue and spend fields are numeric and non-negative.")
+
+    if CUSTOMER_COL in frame.columns and pd.to_numeric(frame[CUSTOMER_COL], errors="coerce").fillna(0).sum() > 0:
+        add_check("CAC support", "Ready", "Customer/conversion counts are available for CAC.")
+    else:
+        add_check("CAC support", "Watch", "Customer/conversion counts are optional but improve CAC reporting.", 5)
+
+    mapped_channels = [channel for channel in channel_cols if channel in frame.columns]
+    if mapped_channels:
+        spend = frame[mapped_channels].apply(pd.to_numeric, errors="coerce").fillna(0)
+        zero_channels = [channel for channel in mapped_channels if float(spend[channel].sum()) <= 0]
+        if zero_channels:
+            add_check("Spend coverage", "Watch", f"No spend detected for: {', '.join(zero_channels)}", 5)
+        else:
+            add_check("Spend coverage", "Ready", "All mapped channels contain spend.")
+
+    readiness_score = int(min(max(score, 0), 100))
+    if readiness_score >= 85:
+        status = "Ready"
+    elif readiness_score >= 65:
+        status = "Usable with caveats"
+    else:
+        status = "Needs cleanup"
+
+    return {
+        "score": readiness_score,
+        "status": status,
+        "checks": pd.DataFrame(checks),
+        "mapping_required": missing,
+    }
 
 
 def prepare_marketing_data(
@@ -244,6 +381,79 @@ def fit_marketing_mix_model(
         date_origin=date_origin,
         date_span_days=date_span_days,
         metrics=metrics,
+        residual_std=float(metrics["rmse"]),
+    )
+
+
+def fit_bayesian_marketing_mix_model(
+    data: pd.DataFrame,
+    channel_cols: Sequence[str] = DEFAULT_CHANNELS,
+    prior_variance: float = 25.0,
+) -> MarketingMixModel:
+    """Fit a lightweight Bayesian MMM using conjugate Bayesian linear regression."""
+    frame = _coerce_model_input(data, channel_cols, require_revenue=True)
+    frame = frame.sort_values(DATE_COL).reset_index(drop=True)
+
+    dates = pd.to_datetime(frame[DATE_COL])
+    date_origin = dates.min()
+    date_span_days = max(int((dates.max() - date_origin).days), 1)
+
+    features = build_feature_frame(
+        frame,
+        channel_cols,
+        date_origin=date_origin,
+        date_span_days=date_span_days,
+    )
+    target = pd.to_numeric(frame[TARGET_COL], errors="coerce").astype(float)
+    feature_means = features.mean()
+    feature_stds = features.std(ddof=0).replace(0, 1.0)
+    standardized = (features - feature_means) / feature_stds
+
+    x_matrix = standardized.to_numpy(dtype=float)
+    y_values = target.to_numpy(dtype=float)
+    design = np.column_stack([np.ones(len(standardized)), x_matrix])
+
+    prior_precision = np.eye(design.shape[1]) / max(float(prior_variance), 1e-6)
+    prior_precision[0, 0] = 1e-8
+
+    gram = np.einsum("ni,nj->ij", design, design)
+    rhs = np.einsum("ni,n->i", design, y_values)
+    system = gram + prior_precision
+    try:
+        ridge_weights = np.linalg.solve(system, rhs)
+    except np.linalg.LinAlgError:
+        ridge_weights = np.linalg.lstsq(system, rhs, rcond=None)[0]
+    residuals = y_values - np.einsum("ij,j->i", design, ridge_weights)
+    residual_std = float(max(np.sqrt(np.mean(residuals**2)), 1.0))
+
+    posterior_precision = prior_precision + np.einsum("ni,nj->ij", design, design) / (residual_std**2)
+    posterior_rhs = np.einsum("ni,n->i", design, y_values) / (residual_std**2)
+    identity = np.eye(posterior_precision.shape[0])
+    try:
+        posterior_covariance = np.linalg.solve(posterior_precision, identity)
+        posterior_mean = np.linalg.solve(posterior_precision, posterior_rhs)
+    except np.linalg.LinAlgError:
+        posterior_covariance = np.linalg.lstsq(posterior_precision, identity, rcond=None)[0]
+        posterior_mean = np.linalg.lstsq(posterior_precision, posterior_rhs, rcond=None)[0]
+
+    intercept = float(posterior_mean[0])
+    coefficients = pd.Series(posterior_mean[1:], index=features.columns, dtype=float)
+    predictions = intercept + np.einsum("ij,j->i", x_matrix, coefficients.to_numpy(dtype=float))
+    metrics = _regression_metrics(y_values, predictions)
+
+    return MarketingMixModel(
+        channel_cols=tuple(channel_cols),
+        feature_columns=tuple(features.columns),
+        feature_means=feature_means,
+        feature_stds=feature_stds,
+        coefficients=coefficients,
+        intercept=intercept,
+        date_origin=date_origin,
+        date_span_days=date_span_days,
+        metrics=metrics,
+        model_kind="Bayesian MMM",
+        posterior_covariance=posterior_covariance,
+        residual_std=residual_std,
     )
 
 
@@ -314,6 +524,108 @@ def evaluate_model_against_baseline(
         "rmse_improvement_pct": float(rmse_improvement_pct),
         "predictions": prediction_df,
     }
+
+
+def compare_candidate_models(
+    data: pd.DataFrame,
+    channel_cols: Sequence[str] = DEFAULT_CHANNELS,
+    regularization: float = 1.5,
+    test_size: float = 0.20,
+) -> pd.DataFrame:
+    """Compare multiple forecasting approaches on the same time-based holdout split."""
+    frame = _coerce_model_input(data, channel_cols, require_revenue=True)
+    frame = frame.sort_values(DATE_COL).reset_index(drop=True)
+    if len(frame) < 12:
+        raise ValueError("At least 12 rows are needed for model comparison.")
+
+    train_df, test_df = _time_train_test_split(frame, test_size=test_size)
+    actual = pd.to_numeric(test_df[TARGET_COL], errors="coerce").to_numpy(dtype=float)
+    rows = []
+
+    baseline_prediction = np.full(
+        len(test_df),
+        float(pd.to_numeric(train_df[TARGET_COL], errors="coerce").mean()),
+        dtype=float,
+    )
+    rows.append(
+        _model_comparison_row(
+            "Average baseline",
+            "Uses historical average revenue only.",
+            actual,
+            baseline_prediction,
+        )
+    )
+
+    calendar_prediction = _fit_predict_feature_model(
+        train_df,
+        test_df,
+        feature_builder=lambda df: _build_calendar_feature_frame(df, train_df),
+        regularization=regularization,
+    )
+    rows.append(
+        _model_comparison_row(
+            "Seasonality baseline",
+            "Uses trend, holiday, and yearly seasonality controls.",
+            actual,
+            calendar_prediction,
+        )
+    )
+
+    ridge_model = fit_marketing_mix_model(train_df, channel_cols=channel_cols, regularization=regularization)
+    rows.append(
+        _model_comparison_row(
+            "Ridge MMM",
+            "Uses spend saturation, adstock carryover, trend, and seasonality.",
+            actual,
+            ridge_model.predict(test_df),
+        )
+    )
+
+    bayesian_model = fit_bayesian_marketing_mix_model(train_df, channel_cols=channel_cols)
+    rows.append(
+        _model_comparison_row(
+            "Bayesian MMM",
+            "Uses the same MMM features with posterior uncertainty estimates.",
+            actual,
+            bayesian_model.predict(test_df),
+        )
+    )
+
+    comparison = pd.DataFrame(rows).sort_values("MAPE", ascending=True).reset_index(drop=True)
+    comparison["Rank"] = np.arange(1, len(comparison) + 1)
+    return comparison[["Rank", "Model", "Description", "R2", "MAE", "RMSE", "MAPE"]]
+
+
+def predict_with_interval(
+    model: MarketingMixModel,
+    data: pd.DataFrame | Mapping[str, object],
+    confidence: float = 0.80,
+) -> pd.DataFrame:
+    """Return mean prediction plus lower/upper confidence bounds."""
+    frame = pd.DataFrame([data]) if isinstance(data, Mapping) else data.copy()
+    frame = _coerce_model_input(frame, model.channel_cols, require_revenue=False)
+    features = build_feature_frame(
+        frame,
+        model.channel_cols,
+        date_origin=model.date_origin,
+        date_span_days=model.date_span_days,
+    ).reindex(columns=model.feature_columns, fill_value=0.0)
+    standardized = (features - model.feature_means) / model.feature_stds
+    design = np.column_stack([np.ones(len(standardized)), standardized.to_numpy(dtype=float)])
+    weights = np.concatenate([[model.intercept], model.coefficients.to_numpy(dtype=float)])
+    mean = np.einsum("ij,j->i", design, weights)
+
+    residual_std = float(model.residual_std or model.metrics.get("rmse", 0.0) or 1.0)
+    if model.posterior_covariance is not None:
+        parameter_variance = np.einsum("ij,jk,ik->i", design, model.posterior_covariance, design)
+        std = np.sqrt(np.maximum(parameter_variance, 0.0) + residual_std**2)
+    else:
+        std = np.full(len(frame), residual_std, dtype=float)
+
+    z_score = _z_score_for_confidence(confidence)
+    lower = np.maximum(mean - z_score * std, 0.0)
+    upper = np.maximum(mean + z_score * std, 0.0)
+    return pd.DataFrame({"Prediction": np.maximum(mean, 0.0), "Lower": lower, "Upper": upper})
 
 
 def build_feature_frame(
@@ -392,6 +704,7 @@ def simulate_spend_change(
     model: MarketingMixModel,
     baseline: Mapping[str, object],
     changes_pct: Mapping[str, float],
+    confidence: float = 0.80,
 ) -> Dict[str, object]:
     current = _scenario_to_frame(baseline, model.channel_cols)
     scenario = current.copy()
@@ -415,6 +728,8 @@ def simulate_spend_change(
 
     current_revenue = float(model.predict(current)[0])
     scenario_revenue = float(model.predict(scenario)[0])
+    current_interval = predict_with_interval(model, current, confidence=confidence).iloc[0]
+    scenario_interval = predict_with_interval(model, scenario, confidence=confidence).iloc[0]
     current_budget = _sum_budget(current.iloc[0], model.channel_cols)
     scenario_budget = _sum_budget(scenario.iloc[0], model.channel_cols)
 
@@ -423,6 +738,12 @@ def simulate_spend_change(
         "scenario_revenue": scenario_revenue,
         "revenue_delta": scenario_revenue - current_revenue,
         "revenue_delta_pct": _safe_pct(scenario_revenue - current_revenue, current_revenue),
+        "current_revenue_low": float(current_interval["Lower"]),
+        "current_revenue_high": float(current_interval["Upper"]),
+        "scenario_revenue_low": float(scenario_interval["Lower"]),
+        "scenario_revenue_high": float(scenario_interval["Upper"]),
+        "revenue_delta_low": float(scenario_interval["Lower"] - current_interval["Upper"]),
+        "revenue_delta_high": float(scenario_interval["Upper"] - current_interval["Lower"]),
         "current_budget": current_budget,
         "scenario_budget": scenario_budget,
         "budget_delta": scenario_budget - current_budget,
@@ -468,6 +789,7 @@ def optimize_budget(
     min_multiplier: float = 0.25,
     max_multiplier: float = 2.0,
     step_count: int = 90,
+    confidence: float = 0.80,
 ) -> Dict[str, object]:
     base_frame = _scenario_to_frame(baseline, model.channel_cols)
     current_values = np.array([float(base_frame.at[0, ch]) for ch in model.channel_cols])
@@ -526,6 +848,13 @@ def optimize_budget(
 
     optimized_prediction = predict_for(allocation)
     baseline_prediction = predict_for(current_values)
+    baseline_scenario = base_frame.copy()
+    optimized_scenario = base_frame.copy()
+    for idx, channel_name in enumerate(model.channel_cols):
+        baseline_scenario.at[0, channel_name] = float(current_values[idx])
+        optimized_scenario.at[0, channel_name] = float(allocation[idx])
+    baseline_interval = predict_with_interval(model, baseline_scenario, confidence=confidence).iloc[0]
+    optimized_interval = predict_with_interval(model, optimized_scenario, confidence=confidence).iloc[0]
 
     rows = []
     for idx, channel in enumerate(model.channel_cols):
@@ -551,6 +880,8 @@ def optimize_budget(
         "optimized_revenue": optimized_prediction,
         "revenue_delta": optimized_prediction - baseline_prediction,
         "revenue_delta_pct": _safe_pct(optimized_prediction - baseline_prediction, baseline_prediction),
+        "revenue_delta_low": float(optimized_interval["Lower"] - baseline_interval["Upper"]),
+        "revenue_delta_high": float(optimized_interval["Upper"] - baseline_interval["Lower"]),
         "allocation": allocation_df.reset_index(drop=True),
     }
 
@@ -636,6 +967,120 @@ def _coerce_model_input(
         frame[CUSTOMER_COL] = pd.to_numeric(frame[CUSTOMER_COL], errors="coerce").fillna(0).clip(lower=0)
 
     return frame
+
+
+def _normalize_column_name(column: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(column).strip().lower()).strip("_")
+
+
+def _column_match_score(canonical: str, normalized: str) -> int:
+    alias_target = _COLUMN_ALIASES.get(normalized)
+    if normalized == canonical or alias_target == canonical:
+        return 10
+
+    token_sets = {
+        DATE_COL: {"date", "week", "period", "month", "day"},
+        TARGET_COL: {"revenue", "sales", "income", "turnover"},
+        CUSTOMER_COL: {"customer", "customers", "conversion", "conversions", "acquisition", "acquisitions"},
+        "google_ads": {"google", "search", "sem", "paid_search", "google_ads"},
+        "meta_ads": {"meta", "facebook", "fb", "paid_social"},
+        "instagram_ads": {"instagram", "ig"},
+        "tv_ads": {"tv", "television", "linear_tv"},
+        "email_marketing": {"email", "newsletter", "crm"},
+        "promotions": {"promo", "promotion", "promotions", "discount", "discounts"},
+    }
+    spend_terms = {"spend", "cost", "budget", "investment"}
+    tokens = set(normalized.split("_"))
+    score = 0
+    for term in token_sets.get(canonical, set()):
+        term_tokens = set(term.split("_"))
+        if term == normalized or term in normalized:
+            score += 4
+        if term_tokens.issubset(tokens):
+            score += 4
+    if canonical in DEFAULT_CHANNELS and tokens.intersection(spend_terms):
+        score += 2
+    return score
+
+
+def _time_train_test_split(data: pd.DataFrame, test_size: float = 0.20) -> tuple[pd.DataFrame, pd.DataFrame]:
+    split_idx = int(len(data) * (1 - float(test_size)))
+    split_idx = min(max(split_idx, 6), len(data) - 3)
+    return data.iloc[:split_idx].copy(), data.iloc[split_idx:].copy()
+
+
+def _build_calendar_feature_frame(data: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    dates = pd.to_datetime(data[DATE_COL])
+    train_dates = pd.to_datetime(train_df[DATE_COL])
+    origin = train_dates.min()
+    span = max(int((train_dates.max() - origin).days), 1)
+    week = dates.dt.isocalendar().week.astype("int64").astype(float)
+    days_since_origin = (dates - origin).dt.days.astype(float)
+    return pd.DataFrame(
+        {
+            "trend": days_since_origin / span,
+            "season_sin": np.sin(2 * np.pi * week / 52),
+            "season_cos": np.cos(2 * np.pi * week / 52),
+            "holiday_q4": dates.dt.month.isin([11, 12]).astype("float64"),
+        },
+        index=data.index,
+    )
+
+
+def _fit_predict_feature_model(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_builder,
+    regularization: float,
+) -> np.ndarray:
+    x_train = feature_builder(train_df).astype(float)
+    x_test = feature_builder(test_df).astype(float).reindex(columns=x_train.columns, fill_value=0.0)
+    means = x_train.mean()
+    stds = x_train.std(ddof=0).replace(0, 1.0)
+    x_train_std = ((x_train - means) / stds).to_numpy(dtype=float)
+    x_test_std = ((x_test - means) / stds).to_numpy(dtype=float)
+    y_train = pd.to_numeric(train_df[TARGET_COL], errors="coerce").to_numpy(dtype=float)
+    design = np.column_stack([np.ones(len(x_train_std)), x_train_std])
+    penalty = np.eye(design.shape[1]) * float(regularization)
+    penalty[0, 0] = 0.0
+    system = np.einsum("ni,nj->ij", design, design) + penalty
+    rhs = np.einsum("ni,n->i", design, y_train)
+    try:
+        weights = np.linalg.solve(system, rhs)
+    except np.linalg.LinAlgError:
+        weights = np.linalg.lstsq(system, rhs, rcond=None)[0]
+    test_design = np.column_stack([np.ones(len(x_test_std)), x_test_std])
+    return np.maximum(np.einsum("ij,j->i", test_design, weights), 0.0)
+
+
+def _model_comparison_row(
+    name: str,
+    description: str,
+    actual: np.ndarray,
+    prediction: np.ndarray,
+) -> Dict[str, object]:
+    metrics = _regression_metrics(actual, prediction)
+    return {
+        "Model": name,
+        "Description": description,
+        "R2": metrics["r2"],
+        "MAE": metrics["mae"],
+        "RMSE": metrics["rmse"],
+        "MAPE": metrics["mape"],
+    }
+
+
+def _z_score_for_confidence(confidence: float) -> float:
+    confidence = float(confidence)
+    if confidence >= 0.98:
+        return 2.33
+    if confidence >= 0.95:
+        return 1.96
+    if confidence >= 0.90:
+        return 1.64
+    if confidence >= 0.80:
+        return 1.28
+    return 1.0
 
 
 def _scenario_to_frame(

@@ -1,102 +1,95 @@
-# NextRole
+# Mixalyzer
 
-AI-powered career operations app for internship and early-career job search workflows.
+AI-powered marketing mix intelligence for budget planning, ROI analysis, and executive-ready recommendations.
 
-NextRole helps users choose the best resume version, analyze fit against a job post, generate tailored application materials, and manage a private application tracker.
+Mixalyzer helps growth and finance teams answer a practical business question: which marketing channels are actually driving revenue, and how should next-period budget be allocated?
 
-## Features
+## Product Highlights
 
-- Secure login, signup, password change, and account deletion with bcrypt hashing.
-- Per-user Postgres tracker for applications, statuses, priorities, fit scores, follow-ups, contacts, notes, and resume used.
-- Resume library with extracted text plus original file storage.
-- Job fit scoring and resume-version recommendations.
-- AI-generated application pack with role summary, gaps, tailored resume bullets, cover letter paragraph, networking message, and interview talking points.
-- CSV and Excel export, CSV import, de-duplication, inline editing, and admin read-only overview.
-- Pipeline insights for active pipeline, interview/offer rate, follow-up pressure, and resume usage.
+- Marketing mix dashboard with spend, revenue, ROI, contribution, CAC, and channel mix.
+- Auto column mapping for uploaded CSV files.
+- Data readiness scoring with checks for required fields, date quality, history length, numeric quality, CAC support, and spend coverage.
+- Ridge MMM with adstock/carryover, saturation-style features, seasonality, and trend.
+- Lightweight Bayesian MMM option with posterior-style confidence intervals.
+- Model comparison across average baseline, seasonality baseline, Ridge MMM, and Bayesian MMM.
+- Budget simulation with conservative, expected, and optimistic revenue impact ranges.
+- Budget optimizer with recommended channel allocation.
+- Responsible AI and risk audit for privacy, bias, model reliability, and hallucination controls.
+- Executive report and allocation CSV downloads.
+- Optional OpenAI-generated recommendation narrative.
 
-## Marketing Mix Optimizer Demo
-
-This repo also includes a standalone AI-powered Marketing Mix Optimization prototype:
-
-- `marketing_mix_model.py` builds the modeling layer: synthetic MMX data, adstock/carryover features, saturated spend features, ridge regression, train/test evaluation, channel contribution, ROI, CAC, simulation, and budget optimization.
-- `mmx_app.py` turns the model into a Streamlit product with a landing page, dashboard, simulation tool, optimizer, executive report download, model evaluation, responsible AI risk audit, and AI recommendation panel.
-
-Run it locally:
-
-```bash
-streamlit run mmx_app.py
-```
-
-The app works with the built-in sample dataset or an uploaded CSV. Uploaded files should include date, revenue/sales, and spend columns for Google Ads, Meta/Facebook Ads, Instagram Ads, TV, Email, and Promotions/Discounts. Include customers/conversions if you want CAC calculated from uploaded data.
-
-## Project Structure
-
-```text
-.
-|-- app.py              # Main Streamlit UI
-|-- agent.py            # OpenAI application-pack generation
-|-- auth.py             # Authentication and user profile preferences
-|-- autofill.py         # Job field extraction
-|-- db.py               # Postgres connection helper
-|-- db_store.py         # Tracker and resume persistence
-|-- marketing_mix_model.py # Marketing mix modeling, simulation, and optimization
-|-- mmx_app.py          # Standalone Streamlit marketing mix optimizer
-|-- tools.py            # Fit scoring, job fetch, resume ranking helpers
-|-- requirements.txt
-`-- tests/
-```
-
-## Local Setup
+## Run Locally
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+streamlit run mmx_app.py
 ```
 
-Create `.env` locally or configure Streamlit secrets with the required values:
+The app runs with built-in sample data. You can also upload a CSV and use the auto-mapping panel to align your fields to Mixalyzer's schema.
 
-```bash
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4o-mini
-DATABASE_URL=postgresql://...
-```
+## Streamlit Cloud
 
-Optional Streamlit secrets:
+Use these deployment settings:
+
+- Repository: `Photon7777/marketing-mix-optimizer`
+- Branch: `main`
+- Main file path: `mmx_app.py`
+
+Optional Streamlit secret for the AI narrative toggle:
 
 ```toml
-admin_users = ["your_username"]
-DATABASE_URL = "postgresql://..."
+OPENAI_API_KEY = "your_key_here"
 ```
 
-Run the app:
+## CSV Schema
 
-```bash
-streamlit run app.py
+Recommended columns:
+
+```text
+date
+revenue
+google_ads
+meta_ads
+instagram_ads
+tv_ads
+email_marketing
+promotions
+new_customers
 ```
 
-## Deployment Notes
+`new_customers` is optional, but it enables CAC reporting.
 
-- Use Postgres-compatible storage such as Neon, Render Postgres, Railway Postgres, or Supabase Postgres.
-- Store `DATABASE_URL` and `OPENAI_API_KEY` in deployment secrets.
-- Do not commit `.env`, Streamlit secrets, local DB files, or runtime tracker artifacts.
+## Project Structure
+
+```text
+.
+|-- marketing_mix_model.py          # MMM modeling, readiness, mapping, evaluation, optimization
+|-- mmx_app.py                      # Streamlit Mixalyzer product
+|-- requirements.txt
+`-- tests/
+    |-- test_core.py
+    `-- test_marketing_mix_model.py
+```
 
 ## Verification
 
-Run a syntax check:
+Run syntax checks:
 
 ```bash
-venv/bin/python -m py_compile app.py agent.py auth.py autofill.py db.py db_store.py tools.py
+venv/bin/python -m py_compile marketing_mix_model.py mmx_app.py
 ```
 
-Run unit tests:
+Run tests:
 
 ```bash
 venv/bin/python -m unittest discover -s tests
 ```
 
-## Security Notes
+## Responsible AI Notes
 
-- Passwords are hashed with bcrypt.
-- Tracker and resume data is scoped by `user_id`.
-- Destructive account deletion verifies the password before wiping tracker/resume data.
+- Use aggregated weekly marketing data; do not upload customer-level identifiers.
+- Treat recommendations as decision support, not automated media-buying instructions.
+- Validate major reallocations with experiments, lift studies, or business review.
+- Monitor model error and data drift before using the optimizer in production.

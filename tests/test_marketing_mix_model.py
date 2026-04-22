@@ -7,10 +7,14 @@ from marketing_mix_model import (
     CHANNEL_LABELS,
     CUSTOMER_COL,
     DEFAULT_CHANNELS,
+    apply_column_mapping,
     apply_adstock,
     build_response_curve,
+    assess_data_readiness,
+    compare_candidate_models,
     evaluate_model_against_baseline,
     estimate_channel_contribution,
+    fit_bayesian_marketing_mix_model,
     fit_marketing_mix_model,
     generate_recommendations,
     generate_sample_marketing_data,
@@ -18,7 +22,9 @@ from marketing_mix_model import (
     normalize_marketing_data,
     optimize_budget,
     prepare_marketing_data,
+    predict_with_interval,
     simulate_spend_change,
+    suggest_column_mapping,
 )
 
 
@@ -58,6 +64,28 @@ class MarketingMixModelTests(unittest.TestCase):
         self.assertEqual(float(prepared["google_ads"].iloc[0]), 10000)
         self.assertEqual(float(prepared[CUSTOMER_COL].iloc[0]), 250)
 
+    def test_auto_mapping_and_readiness_score_uploaded_columns(self):
+        uploaded = pd.DataFrame(
+            {
+                "Week Start": ["2026-01-04", "2026-01-11"] * 30,
+                "Sales": [100000, 110000] * 30,
+                "Google Ads Spend": [10000, 12000] * 30,
+                "Facebook Spend": [8000, 8500] * 30,
+                "Instagram Budget": [6000, 6300] * 30,
+                "TV Cost": [12000, 11000] * 30,
+                "Email Spend": [2000, 2200] * 30,
+                "Discounts": [3000, 3100] * 30,
+                "Customers": [250, 270] * 30,
+            }
+        )
+
+        mapping = suggest_column_mapping(uploaded)
+        mapped = apply_column_mapping(uploaded, mapping)
+        readiness = assess_data_readiness(mapped)
+
+        self.assertEqual(mapping["google_ads"], "Google Ads Spend")
+        self.assertGreaterEqual(readiness["score"], 65)
+
     def test_model_fits_demo_data_with_useful_accuracy(self):
         self.assertGreater(self.model.metrics["r2"], 0.75)
         self.assertLess(self.model.metrics["mape"], 5)
@@ -75,6 +103,20 @@ class MarketingMixModelTests(unittest.TestCase):
         self.assertIn("baseline_metrics", evaluation)
         self.assertEqual(len(evaluation["predictions"]), evaluation["test_rows"])
 
+    def test_model_comparison_includes_bayesian_candidate(self):
+        comparison = compare_candidate_models(self.data)
+
+        self.assertIn("Bayesian MMM", comparison["Model"].tolist())
+        self.assertEqual(comparison["Rank"].tolist(), sorted(comparison["Rank"].tolist()))
+
+    def test_bayesian_model_returns_prediction_intervals(self):
+        bayesian_model = fit_bayesian_marketing_mix_model(self.data)
+        interval = predict_with_interval(bayesian_model, self.data.tail(3))
+
+        self.assertEqual(len(interval), 3)
+        self.assertTrue((interval["Lower"] <= interval["Prediction"]).all())
+        self.assertTrue((interval["Prediction"] <= interval["Upper"]).all())
+
     def test_channel_contribution_returns_roi_for_each_channel(self):
         contribution = estimate_channel_contribution(self.model, self.data)
 
@@ -89,6 +131,8 @@ class MarketingMixModelTests(unittest.TestCase):
 
         self.assertGreater(simulation["scenario_budget"], simulation["current_budget"])
         self.assertIn("revenue_delta_pct", simulation)
+        self.assertIn("revenue_delta_low", simulation)
+        self.assertIn("revenue_delta_high", simulation)
         self.assertEqual(len(simulation["details"]), len(DEFAULT_CHANNELS))
 
     def test_response_curve_is_monotonic_for_strong_channel(self):

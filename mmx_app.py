@@ -29,7 +29,18 @@ from marketing_mix_model import (
 )
 
 try:
-    from marketing_mix_model import DEFAULT_ADSTOCK_DECAYS
+    from marketing_mix_model import (
+        DEFAULT_ADSTOCK_DECAYS,
+        FIELD_LABELS,
+        OPTIONAL_MODEL_COLUMNS,
+        REQUIRED_MODEL_COLUMNS,
+        apply_column_mapping,
+        assess_data_readiness,
+        compare_candidate_models,
+        fit_bayesian_marketing_mix_model,
+        predict_with_interval,
+        suggest_column_mapping,
+    )
 except ImportError:
     DEFAULT_ADSTOCK_DECAYS = {
         "google_ads": 0.35,
@@ -39,6 +50,41 @@ except ImportError:
         "email_marketing": 0.20,
         "promotions": 0.25,
     }
+    FIELD_LABELS = {DATE_COL: "Date", TARGET_COL: "Revenue", CUSTOMER_COL: "New Customers", **CHANNEL_LABELS}
+    REQUIRED_MODEL_COLUMNS = (DATE_COL, TARGET_COL, *DEFAULT_CHANNELS)
+    OPTIONAL_MODEL_COLUMNS = (CUSTOMER_COL,)
+
+    def suggest_column_mapping(data: pd.DataFrame) -> dict[str, str]:
+        return {column: column if column in data.columns else "" for column in (*REQUIRED_MODEL_COLUMNS, *OPTIONAL_MODEL_COLUMNS)}
+
+    def apply_column_mapping(data: pd.DataFrame, mapping: Mapping[str, str]) -> pd.DataFrame:
+        frame = data.copy()
+        for canonical, source in mapping.items():
+            if source and source in data.columns:
+                frame[canonical] = data[source]
+        return frame
+
+    def assess_data_readiness(data: pd.DataFrame) -> dict[str, object]:
+        missing = [column for column in REQUIRED_MODEL_COLUMNS if column not in normalize_marketing_data(data).columns]
+        score = max(0, 100 - 12 * len(missing))
+        return {
+            "score": score,
+            "status": "Ready" if not missing else "Needs cleanup",
+            "checks": pd.DataFrame(
+                [{"Area": "Required columns", "Status": "Ready" if not missing else "Needs attention", "Detail": ", ".join(missing) or "Required fields present."}]
+            ),
+        }
+
+    def compare_candidate_models(*args, **kwargs) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    def fit_bayesian_marketing_mix_model(data: pd.DataFrame):
+        return fit_marketing_mix_model(data)
+
+    def predict_with_interval(model, data, confidence: float = 0.80) -> pd.DataFrame:
+        prediction = model.predict(data)
+        error = float(model.metrics.get("rmse", 1.0))
+        return pd.DataFrame({"Prediction": prediction, "Lower": prediction - error, "Upper": prediction + error})
 
 try:
     from marketing_mix_model import evaluate_model_against_baseline
@@ -50,8 +96,8 @@ except ImportError:
 load_dotenv()
 
 st.set_page_config(
-    page_title="Marketing Mix Optimizer",
-    page_icon="MMX",
+    page_title="Mixalyzer",
+    page_icon="M",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -61,10 +107,36 @@ st.markdown(
     """
     <style>
       #MainMenu, footer {visibility: hidden;}
+      .stApp {
+        background:
+          linear-gradient(180deg, #07100f 0%, #08131a 44%, #0d1117 100%);
+      }
       .block-container {
-        max-width: 1360px;
+        max-width: 1420px;
         padding-top: 1.4rem;
         padding-bottom: 2.5rem;
+      }
+      .brand-kicker {
+        color: #24c6a1;
+        font-size: 0.84rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 0.2rem;
+      }
+      .brand-title {
+        color: #f8fafc;
+        font-size: 3rem;
+        font-weight: 850;
+        line-height: 1;
+        margin: 0 0 0.35rem;
+      }
+      .brand-subtitle {
+        color: rgba(226, 232, 240, 0.76);
+        max-width: 860px;
+        font-size: 1rem;
+        line-height: 1.5;
+        margin-bottom: 1.2rem;
       }
       .metric-label {
         color: rgba(226, 232, 240, 0.72);
@@ -83,8 +155,8 @@ st.markdown(
         margin-top: 0.18rem;
       }
       .kpi-card {
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        background: rgba(15, 23, 42, 0.55);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: linear-gradient(180deg, rgba(19, 29, 38, 0.82), rgba(12, 19, 27, 0.84));
         border-radius: 8px;
         padding: 0.8rem 0.95rem;
         min-height: 104px;
@@ -123,7 +195,7 @@ st.markdown(
       }
       .panel {
         border: 1px solid rgba(148, 163, 184, 0.18);
-        background: rgba(15, 23, 42, 0.68);
+        background: rgba(13, 21, 29, 0.76);
         border-radius: 8px;
         padding: 1rem;
       }
@@ -138,8 +210,8 @@ st.markdown(
       .hero {
         border: 1px solid rgba(148, 163, 184, 0.18);
         background:
-          linear-gradient(135deg, rgba(56, 215, 193, 0.14), rgba(124, 140, 255, 0.08)),
-          rgba(15, 23, 42, 0.76);
+          linear-gradient(135deg, rgba(36, 198, 161, 0.16), rgba(246, 200, 95, 0.07)),
+          rgba(13, 21, 29, 0.82);
         border-radius: 8px;
         padding: 1.35rem 1.45rem;
         margin-bottom: 1rem;
@@ -157,7 +229,7 @@ st.markdown(
       }
       .feature-card {
         border: 1px solid rgba(148, 163, 184, 0.16);
-        background: rgba(15, 23, 42, 0.58);
+        background: rgba(13, 21, 29, 0.72);
         border-radius: 8px;
         padding: 0.9rem;
         min-height: 120px;
@@ -175,6 +247,18 @@ st.markdown(
       }
       .risk-watch {
         border-left: 3px solid #f59e0b;
+      }
+      .readiness-good {
+        border-left: 4px solid #24c6a1;
+      }
+      .readiness-watch {
+        border-left: 4px solid #f6c85f;
+      }
+      .readiness-bad {
+        border-left: 4px solid #fb7185;
+      }
+      div[data-testid="stTabs"] button p {
+        font-weight: 700;
       }
       div[data-testid="stMetric"] {
         border: 1px solid rgba(148, 163, 184, 0.16);
@@ -200,8 +284,11 @@ def load_sample_data() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def train_model(data: pd.DataFrame, regularization: float):
-    model = fit_marketing_mix_model(data, regularization=regularization)
+def train_model(data: pd.DataFrame, regularization: float, model_engine: str):
+    if model_engine.startswith("Bayesian"):
+        model = fit_bayesian_marketing_mix_model(data)
+    else:
+        model = fit_marketing_mix_model(data, regularization=regularization)
     contribution = estimate_channel_contribution(model, data)
     baseline = get_baseline_scenario(data)
     return model, contribution, baseline
@@ -210,6 +297,11 @@ def train_model(data: pd.DataFrame, regularization: float):
 @st.cache_data(show_spinner=False)
 def evaluate_current_model(data: pd.DataFrame, regularization: float):
     return evaluate_model_against_baseline(data, regularization=regularization)
+
+
+@st.cache_data(show_spinner=False)
+def compare_models(data: pd.DataFrame, regularization: float):
+    return compare_candidate_models(data, regularization=regularization)
 
 
 def money(value: float) -> str:
@@ -243,6 +335,17 @@ def render_metric_card(label: object, value: object, delta: object | None = None
     )
 
 
+def render_loader(message: str) -> None:
+    st.markdown(
+        f"""
+        <div class="panel">
+          <strong>{escape(message)}</strong>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def dataframe_to_markdown_table(frame: pd.DataFrame) -> str:
     headers = list(frame.columns)
     rows = [
@@ -260,11 +363,103 @@ def dataframe_to_markdown_table(frame: pd.DataFrame) -> str:
     return "\n".join(rows)
 
 
-def prepare_uploaded_data(upload) -> pd.DataFrame:
+def read_input_data(upload) -> pd.DataFrame:
     if upload is None:
         return load_sample_data()
-    frame = pd.read_csv(upload)
-    return normalize_marketing_data(frame)
+    return pd.read_csv(upload)
+
+
+def build_column_mapping_controls(raw_frame: pd.DataFrame, upload_present: bool) -> dict[str, str]:
+    if not upload_present:
+        return {column: column for column in (*REQUIRED_MODEL_COLUMNS, *OPTIONAL_MODEL_COLUMNS)}
+
+    suggestions = suggest_column_mapping(raw_frame)
+    options = [""] + list(raw_frame.columns)
+    mapping: dict[str, str] = {}
+    for canonical in (*REQUIRED_MODEL_COLUMNS, *OPTIONAL_MODEL_COLUMNS):
+        suggested = suggestions.get(canonical, "")
+        default_index = options.index(suggested) if suggested in options else 0
+        mapping[canonical] = st.selectbox(
+            FIELD_LABELS.get(canonical, canonical),
+            options=options,
+            index=default_index,
+            key=f"column_map_{canonical}",
+        )
+    return mapping
+
+
+def readiness_class(status: str) -> str:
+    if status == "Ready":
+        return "readiness-good"
+    if status == "Usable with caveats":
+        return "readiness-watch"
+    return "readiness-bad"
+
+
+def confidence_range_chart(summary: pd.DataFrame) -> alt.Chart:
+    return (
+        alt.Chart(summary)
+        .mark_bar(cornerRadius=5)
+        .encode(
+            x=alt.X("Case:N", title=None),
+            y=alt.Y("Revenue Delta:Q", title="Predicted revenue impact"),
+            color=alt.Color(
+                "Case:N",
+                scale=alt.Scale(range=["#fb7185", "#24c6a1", "#f6c85f"]),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Case:N"),
+                alt.Tooltip("Revenue Delta:Q", format="$,.0f"),
+            ],
+        )
+        .properties(height=240)
+    )
+
+
+def model_comparison_chart(comparison: pd.DataFrame) -> alt.Chart:
+    return (
+        alt.Chart(comparison)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X("Model:N", sort=alt.SortField("MAPE", order="ascending"), title=None),
+            y=alt.Y("MAPE:Q", title="MAPE"),
+            color=alt.Color(
+                "Model:N",
+                scale=alt.Scale(range=["#24c6a1", "#8ab4ff", "#f6c85f", "#fb7185"]),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Model:N"),
+                alt.Tooltip("MAPE:Q", format=".2f"),
+                alt.Tooltip("RMSE:Q", format="$,.0f"),
+                alt.Tooltip("R2:Q", format=".2f"),
+            ],
+        )
+        .properties(height=300)
+    )
+
+
+def simulate_with_confidence(model, baseline: Mapping[str, object], changes: Mapping[str, float], confidence: float):
+    try:
+        return simulate_spend_change(model, baseline, changes, confidence=confidence)
+    except TypeError:
+        result = simulate_spend_change(model, baseline, changes)
+        spread = float(model.metrics.get("rmse", 0.0) or 0.0)
+        result.setdefault("revenue_delta_low", result["revenue_delta"] - spread)
+        result.setdefault("revenue_delta_high", result["revenue_delta"] + spread)
+        return result
+
+
+def optimize_with_confidence(model, baseline: Mapping[str, object], budget: float, confidence: float):
+    try:
+        return optimize_budget(model, baseline, total_budget=budget, confidence=confidence)
+    except TypeError:
+        result = optimize_budget(model, baseline, total_budget=budget)
+        spread = float(model.metrics.get("rmse", 0.0) or 0.0)
+        result.setdefault("revenue_delta_low", result["revenue_delta"] - spread)
+        result.setdefault("revenue_delta_high", result["revenue_delta"] + spread)
+        return result
 
 
 def build_csv_template() -> bytes:
@@ -659,7 +854,7 @@ def maybe_generate_openai_recommendations(
 
 
 with st.sidebar:
-    st.title("MMX")
+    st.markdown("### Mixalyzer")
     uploaded = st.file_uploader("Marketing dataset", type=["csv"])
     st.download_button(
         "Download CSV template",
@@ -668,22 +863,42 @@ with st.sidebar:
         mime="text/csv",
         use_container_width=True,
     )
+    raw_data = read_input_data(uploaded)
+    with st.expander("Auto column mapping", expanded=uploaded is not None):
+        column_mapping = build_column_mapping_controls(raw_data, uploaded is not None)
+    mapped_input = apply_column_mapping(raw_data, column_mapping) if uploaded is not None else raw_data
+    readiness = assess_data_readiness(mapped_input)
+    st.caption(f"Data readiness: {readiness['score']}/100 · {readiness['status']}")
+    model_engine = st.selectbox(
+        "Model engine",
+        ["Ridge MMM (fast)", "Bayesian MMM (posterior)"],
+        index=0,
+    )
+    confidence_level = st.select_slider(
+        "Confidence range",
+        options=[0.80, 0.90, 0.95],
+        value=0.80,
+        format_func=lambda value: f"{int(value * 100)}%",
+    )
     regularization = st.slider("Model regularization", 0.1, 5.0, 1.5, 0.1)
     use_openai = st.toggle("OpenAI recommendation narrative", value=False)
 
 
 try:
-    raw_data = prepare_uploaded_data(uploaded)
-    data = prepare_marketing_data(raw_data)
-    model, contribution_df, baseline_scenario = train_model(data, regularization)
+    with st.spinner("Mixalyzer is cleaning data and training the MMM engine..."):
+        data = prepare_marketing_data(mapped_input)
+        model, contribution_df, baseline_scenario = train_model(data, regularization, model_engine)
 except Exception as exc:
     st.error(f"Could not train the marketing mix model: {exc}")
     st.stop()
 
 try:
-    evaluation_results = evaluate_current_model(data, regularization)
+    with st.spinner("Running holdout evaluation and model comparison..."):
+        evaluation_results = evaluate_current_model(data, regularization)
+        model_comparison_df = compare_models(data, regularization)
 except Exception:
     evaluation_results = None
+    model_comparison_df = pd.DataFrame()
 
 
 total_spend = float(data[list(DEFAULT_CHANNELS)].sum().sum())
@@ -692,7 +907,16 @@ model_roi = float(total_revenue / total_spend) if total_spend else 0.0
 total_customers = float(data[CUSTOMER_COL].sum()) if CUSTOMER_COL in data.columns else 0.0
 cac = float(total_spend / total_customers) if total_customers else None
 
-st.title("Marketing Mix Optimization Platform")
+st.markdown(
+    """
+    <div class="brand-kicker">Mixalyzer</div>
+    <div class="brand-title">Marketing Mix Intelligence</div>
+    <div class="brand-subtitle">
+      Forecast revenue, compare MMM engines, audit data readiness, and turn budget shifts into executive-ready recommendations.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 kpi_cols = st.columns(6)
 top_metrics = [
@@ -710,6 +934,7 @@ for col, (label, value) in zip(kpi_cols, top_metrics):
 tabs = st.tabs(
     [
         "Product",
+        "Data Setup",
         "Dashboard",
         "Simulation",
         "Optimization",
@@ -725,8 +950,8 @@ with tabs[0]:
         <div class="hero">
           <h2>Allocate marketing budget with evidence, not guesswork.</h2>
           <p>
-            A decision-support product for growth leaders who need to identify which channels drive revenue,
-            simulate budget shifts, and reduce CAC while protecting marketing ROI.
+            Mixalyzer helps growth teams identify which channels drive revenue, simulate budget shifts,
+            quantify confidence ranges, and reduce CAC while protecting marketing ROI.
           </p>
         </div>
         """,
@@ -797,6 +1022,44 @@ with tabs[0]:
             )
 
 with tabs[1]:
+    st.subheader("Data readiness and column mapping")
+    ready_cols = st.columns(4)
+    with ready_cols[0]:
+        render_metric_card("Readiness score", f"{readiness['score']}/100")
+    with ready_cols[1]:
+        render_metric_card("Status", readiness["status"])
+    with ready_cols[2]:
+        render_metric_card("Rows", f"{len(data):,}")
+    with ready_cols[3]:
+        render_metric_card("Mapped fields", f"{len([v for v in column_mapping.values() if v])}/{len(column_mapping)}")
+
+    st.markdown(
+        f"""
+        <div class="feature-card {readiness_class(readiness['status'])}">
+          <h4>Data readiness verdict</h4>
+          <p>Mixalyzer checked required fields, date quality, history length, numeric quality, CAC support, and spend coverage.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    map_left, map_right = st.columns([1, 1])
+    with map_left:
+        mapping_rows = [
+            {
+                "Mixalyzer Field": FIELD_LABELS.get(canonical, canonical),
+                "Source Column": source or "Not mapped",
+            }
+            for canonical, source in column_mapping.items()
+        ]
+        st.dataframe(pd.DataFrame(mapping_rows), hide_index=True, use_container_width=True)
+    with map_right:
+        st.dataframe(readiness["checks"], hide_index=True, use_container_width=True)
+
+    st.subheader("Cleaned data preview")
+    st.dataframe(data.head(20), hide_index=True, use_container_width=True)
+
+with tabs[2]:
     left, right = st.columns([1.45, 1])
     with left:
         st.subheader("Spend and revenue trend")
@@ -813,7 +1076,7 @@ with tabs[1]:
         st.subheader("Channel spend mix")
         st.altair_chart(channel_spend_chart(data), use_container_width=True)
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("Budget simulation")
     sliders = {}
     slider_cols = st.columns(3)
@@ -828,7 +1091,7 @@ with tabs[2]:
                 format="%d%%",
             )
 
-    simulation = simulate_spend_change(model, baseline_scenario, sliders)
+    simulation = simulate_with_confidence(model, baseline_scenario, sliders, confidence_level)
     metric_cols = st.columns(4)
     simulation_metrics = [
         ("Current revenue", money(simulation["current_revenue"]), None),
@@ -839,6 +1102,15 @@ with tabs[2]:
     for col, (label, value, delta) in zip(metric_cols, simulation_metrics):
         with col:
             render_metric_card(label, value, delta)
+
+    confidence_summary = pd.DataFrame(
+        [
+            {"Case": "Conservative", "Revenue Delta": simulation["revenue_delta_low"]},
+            {"Case": "Expected", "Revenue Delta": simulation["revenue_delta"]},
+            {"Case": "Optimistic", "Revenue Delta": simulation["revenue_delta_high"]},
+        ]
+    )
+    st.altair_chart(confidence_range_chart(confidence_summary), use_container_width=True)
 
     sim_left, sim_right = st.columns([1.1, 1])
     with sim_left:
@@ -855,7 +1127,7 @@ with tabs[2]:
         curve = build_response_curve(model, baseline_scenario, selected_channel)
         st.altair_chart(response_curve_chart(curve), use_container_width=True)
 
-with tabs[3]:
+with tabs[4]:
     current_weekly_budget = sum(float(baseline_scenario[channel]) for channel in DEFAULT_CHANNELS)
     target_budget = st.slider(
         "Next-period marketing budget",
@@ -865,7 +1137,7 @@ with tabs[3]:
         step=500.0,
         format="$%.0f",
     )
-    optimization = optimize_budget(model, baseline_scenario, total_budget=target_budget)
+    optimization = optimize_with_confidence(model, baseline_scenario, target_budget, confidence_level)
 
     opt_cols = st.columns(4)
     optimization_metrics = [
@@ -877,6 +1149,12 @@ with tabs[3]:
     for col, (label, value, delta) in zip(opt_cols, optimization_metrics):
         with col:
             render_metric_card(label, value, delta)
+
+    st.caption(
+        "Optimized revenue impact range: "
+        f"{signed_money(optimization['revenue_delta_low'])} to {signed_money(optimization['revenue_delta_high'])} "
+        f"at {int(confidence_level * 100)}% confidence."
+    )
 
     opt_left, opt_right = st.columns([1.2, 1])
     with opt_left:
@@ -936,7 +1214,38 @@ with tabs[3]:
             use_container_width=True,
         )
 
-with tabs[4]:
+with tabs[5]:
+    st.subheader("Model comparison")
+    if not model_comparison_df.empty:
+        best_model = model_comparison_df.iloc[0]
+        cmp_cols = st.columns(4)
+        with cmp_cols[0]:
+            render_metric_card("Best model", best_model["Model"])
+        with cmp_cols[1]:
+            render_metric_card("Best MAPE", pct(best_model["MAPE"]))
+        with cmp_cols[2]:
+            render_metric_card("Selected engine", model.model_kind)
+        with cmp_cols[3]:
+            render_metric_card("Confidence mode", f"{int(confidence_level * 100)}% interval")
+        left_cmp, right_cmp = st.columns([1, 1.25])
+        with left_cmp:
+            st.altair_chart(model_comparison_chart(model_comparison_df), use_container_width=True)
+        with right_cmp:
+            st.dataframe(
+                model_comparison_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "R2": st.column_config.NumberColumn(format="%.2f"),
+                    "MAE": st.column_config.NumberColumn(format="$%.0f"),
+                    "RMSE": st.column_config.NumberColumn(format="$%.0f"),
+                    "MAPE": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
+    else:
+        st.info("Upload at least 12 dated observations to compare model candidates.")
+
+    st.divider()
     st.subheader("Train/test evaluation")
     if evaluation_results:
         eval_cols = st.columns(5)
@@ -977,7 +1286,7 @@ with tabs[4]:
     else:
         st.info("Upload at least 12 dated observations to show train/test evaluation.")
 
-with tabs[5]:
+with tabs[6]:
     st.subheader("Responsible AI and risk audit")
     risk_df = build_responsible_ai_audit(data, evaluation_results, contribution_df)
     managed = int((risk_df["Status"] == "Managed").sum())
@@ -1008,7 +1317,7 @@ with tabs[5]:
 
     st.dataframe(risk_df, hide_index=True, use_container_width=True)
 
-with tabs[6]:
+with tabs[7]:
     model_left, model_right = st.columns([1, 1])
     with model_left:
         st.subheader("Training data")
