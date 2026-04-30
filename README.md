@@ -17,8 +17,8 @@ Mixalyzer helps growth and finance teams answer a practical business question: w
 - Budget simulation with conservative, expected, and optimistic revenue impact ranges.
 - Budget optimizer with recommended channel allocation.
 - Responsible AI and risk audit for privacy, bias, model reliability, and hallucination controls.
-- Executive report and allocation CSV downloads.
-- Optional OpenAI-generated recommendation narrative grounded in a downloadable MMM evidence packet.
+- Executive PDF, allocation Excel workbook, and GenAI evidence workbook downloads.
+- Optional OpenAI-generated recommendation narrative grounded in a downloadable MMM evidence workbook.
 
 ## Run Locally
 

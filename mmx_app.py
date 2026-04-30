@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from html import escape
+import io
 import json
 import os
 from typing import Mapping
@@ -778,6 +779,290 @@ def build_executive_report(
     return "\n".join(lines)
 
 
+def _clean_export_value(value: object) -> object:
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, default=str)
+    if pd.isna(value):
+        return ""
+    return value
+
+
+def _style_workbook(workbook) -> None:
+    from openpyxl.styles import Alignment, Font, PatternFill, Side, Border
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill("solid", fgColor="0F766E")
+    header_font = Font(color="FFFFFF", bold=True)
+    border = Border(bottom=Side(style="thin", color="CBD5E1"))
+
+    for worksheet in workbook.worksheets:
+        worksheet.freeze_panes = "A2"
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        for column_cells in worksheet.columns:
+            values = [str(cell.value or "") for cell in column_cells]
+            width = min(max(max(len(value) for value in values) + 2, 12), 48)
+            worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
+
+
+def _write_excel_frame(writer: pd.ExcelWriter, frame: pd.DataFrame, sheet_name: str) -> None:
+    cleaned = frame.copy()
+    for column in cleaned.columns:
+        cleaned[column] = cleaned[column].map(_clean_export_value)
+    cleaned.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+
+def _evidence_packet_sheets(evidence_packet: Mapping[str, object]) -> dict[str, pd.DataFrame]:
+    prediction = evidence_packet.get("prediction_layer", {}) or {}
+    generation = evidence_packet.get("generation_layer", {}) or {}
+    optimization = evidence_packet.get("optimization", {}) or {}
+    targets = evidence_packet.get("business_targets", {}) or {}
+
+    prediction_rows = [
+        {"Item": "Selected AI approach", "Value": evidence_packet.get("selected_ai_approach", "")},
+        {"Item": "Prediction model", "Value": prediction.get("model", "")},
+        {"Item": "Model features", "Value": ", ".join(prediction.get("features", []))},
+    ]
+    prediction_rows.extend(
+        {"Item": f"Metric: {metric}", "Value": value}
+        for metric, value in (prediction.get("metrics", {}) or {}).items()
+    )
+
+    generation_rows = [
+        {"Item": "Strategy", "Value": generation.get("strategy", "")},
+        {"Item": "Allowed outputs", "Value": ", ".join(generation.get("allowed_outputs", []))},
+        {"Item": "Guardrails", "Value": "; ".join(generation.get("guardrails", []))},
+    ]
+
+    sheets = {
+        "AI Approach": pd.DataFrame(prediction_rows + generation_rows),
+        "Business Targets": pd.DataFrame(
+            [{"Target": key, "Value": value} for key, value in targets.items()]
+        ),
+        "Optimization": pd.DataFrame(
+            [{"Metric": key, "Value": value} for key, value in optimization.items()]
+        ),
+        "Top Channels": pd.DataFrame(evidence_packet.get("top_channel_evidence", [])),
+        "Recommended Allocation": pd.DataFrame(evidence_packet.get("recommended_allocation", [])),
+    }
+    evaluation = evidence_packet.get("evaluation", {}) or {}
+    if evaluation:
+        sheets["Evaluation"] = pd.DataFrame([{"Metric": key, "Value": value} for key, value in evaluation.items()])
+    return sheets
+
+
+def build_evidence_workbook(evidence_packet: Mapping[str, object]) -> bytes:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, frame in _evidence_packet_sheets(evidence_packet).items():
+            _write_excel_frame(writer, frame, sheet_name)
+        _style_workbook(writer.book)
+    return buffer.getvalue()
+
+
+def build_allocation_workbook(
+    optimization: Mapping[str, object],
+    scorecard: pd.DataFrame,
+    recommendations: list[str],
+) -> bytes:
+    summary = pd.DataFrame(
+        [
+            {"Metric": "Current budget", "Value": optimization.get("current_budget")},
+            {"Metric": "Recommended budget", "Value": optimization.get("recommended_budget")},
+            {"Metric": "Optimized revenue", "Value": optimization.get("optimized_revenue")},
+            {"Metric": "Revenue delta", "Value": optimization.get("revenue_delta")},
+            {"Metric": "Revenue delta %", "Value": optimization.get("revenue_delta_pct")},
+            {"Metric": "Unallocated budget", "Value": optimization.get("unallocated_budget")},
+        ]
+    )
+    recommendations_df = pd.DataFrame({"Recommendation": recommendations})
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        _write_excel_frame(writer, summary, "Budget Summary")
+        _write_excel_frame(writer, display_business_scorecard(scorecard), "KPI Scorecard")
+        _write_excel_frame(writer, optimization["allocation"], "Recommended Allocation")
+        _write_excel_frame(writer, recommendations_df, "Recommendations")
+        _style_workbook(writer.book)
+    return buffer.getvalue()
+
+
+def build_executive_report_pdf(
+    data: pd.DataFrame,
+    contribution: pd.DataFrame,
+    optimization: Mapping[str, object],
+    simulation: Mapping[str, object],
+    evaluation: Mapping[str, object] | None,
+    recommendations: list[str],
+    scorecard: pd.DataFrame,
+) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buffer = io.BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.55 * inch,
+        leftMargin=0.55 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.55 * inch,
+        title="Mixalyzer Executive Report",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "MixalyzerTitle",
+        parent=styles["Title"],
+        textColor=colors.HexColor("#0F766E"),
+        fontSize=22,
+        leading=26,
+        spaceAfter=8,
+    )
+    section_style = ParagraphStyle(
+        "MixalyzerSection",
+        parent=styles["Heading2"],
+        textColor=colors.HexColor("#0F172A"),
+        fontSize=13,
+        leading=16,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    body_style = ParagraphStyle(
+        "MixalyzerBody",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#1F2937"),
+    )
+
+    def table(data_rows: list[list[object]], widths: list[float] | None = None) -> Table:
+        formatted_rows = [
+            [Paragraph(escape(str(cell)), body_style) for cell in row]
+            for row in data_rows
+        ]
+        built = Table(formatted_rows, colWidths=widths, hAlign="LEFT")
+        built.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F766E")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+                    ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F8FAFC")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        return built
+
+    total_spend_value = float(data[list(DEFAULT_CHANNELS)].sum().sum())
+    total_revenue_value = float(data[TARGET_COL].sum())
+    total_customers_value = float(data[CUSTOMER_COL].sum()) if CUSTOMER_COL in data.columns else 0.0
+    cac_value = total_spend_value / total_customers_value if total_customers_value else None
+    top_roi = contribution.sort_values("ROI", ascending=False).iloc[0]
+    weakest_roi = contribution.sort_values("ROI", ascending=True).iloc[0]
+    allocation = optimization["allocation"][
+        ["Channel", "Current Spend", "Recommended Spend", "Spend Shift", "Change %"]
+    ].copy()
+
+    story = [
+        Paragraph("Mixalyzer Executive Report", title_style),
+        Paragraph(f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}", body_style),
+        Spacer(1, 8),
+        Paragraph("Business KPI Snapshot", section_style),
+        table(
+            [
+                ["Metric", "Value"],
+                ["Revenue analyzed", money(total_revenue_value)],
+                ["Marketing spend analyzed", money(total_spend_value)],
+                ["Marketing ROI", f"{total_revenue_value / total_spend_value:.2f}x" if total_spend_value else "N/A"],
+                ["CAC", money(cac_value) if cac_value else "N/A"],
+                ["Predicted optimized lift", f"{signed_money(optimization['revenue_delta'])} ({optimization['revenue_delta_pct']:.1f}%)"],
+            ],
+            [2.3 * inch, 4.1 * inch],
+        ),
+        Paragraph("Business Goal Attainment", section_style),
+        table(
+            [["Business KPI", "Current", "Projected", "Delta", "Target", "Status"]]
+            + display_business_scorecard(scorecard)[
+                ["Business KPI", "Current", "Projected", "Delta", "Target", "Status"]
+            ].values.tolist()
+        ),
+        Paragraph("Recommended Allocation", section_style),
+        table(
+            [["Channel", "Current Spend", "Recommended Spend", "Shift", "Change"]]
+            + [
+                [
+                    row["Channel"],
+                    money(float(row["Current Spend"])),
+                    money(float(row["Recommended Spend"])),
+                    signed_money(float(row["Spend Shift"])),
+                    pct(float(row["Change %"])),
+                ]
+                for _, row in allocation.iterrows()
+            ]
+        ),
+        Paragraph("Channel Insights", section_style),
+        table(
+            [
+                ["Insight", "Value"],
+                ["Highest estimated ROI", f"{top_roi['Channel']} at {float(top_roi['ROI']):.2f}x"],
+                ["Lowest estimated ROI", f"{weakest_roi['Channel']} at {float(weakest_roi['ROI']):.2f}x"],
+                ["Active simulation impact", f"{signed_money(simulation['revenue_delta'])} ({simulation['revenue_delta_pct']:.1f}%)"],
+            ],
+            [2.3 * inch, 4.1 * inch],
+        ),
+    ]
+
+    story.append(Paragraph("Model Evaluation", section_style))
+    if evaluation:
+        story.append(
+            table(
+                [
+                    ["Metric", "Value"],
+                    ["Train rows", evaluation["train_rows"]],
+                    ["Test rows", evaluation["test_rows"]],
+                    ["MMX MAPE", f"{evaluation['model_metrics']['mape']:.2f}%"],
+                    ["Baseline MAPE", f"{evaluation['baseline_metrics']['mape']:.2f}%"],
+                    ["RMSE improvement", f"{evaluation['rmse_improvement_pct']:.1f}%"],
+                ],
+                [2.3 * inch, 4.1 * inch],
+            )
+        )
+    else:
+        story.append(Paragraph("Evaluation unavailable because the uploaded dataset is too short.", body_style))
+
+    story.append(Paragraph("Management Recommendations", section_style))
+    for recommendation in recommendations:
+        story.append(Paragraph(f"- {escape(recommendation)}", body_style))
+
+    story.append(Paragraph("Responsible AI Notes", section_style))
+    for note in [
+        "Treat recommendations as decision support, not automated media-buying instructions.",
+        "Validate large reallocations with incrementality tests or controlled experiments.",
+        "Use aggregated spend, revenue, and customer data; avoid customer-level identifiers.",
+    ]:
+        story.append(Paragraph(f"- {note}", body_style))
+
+    document.build(story)
+    return buffer.getvalue()
+
+
 def line_spend_revenue_chart(data: pd.DataFrame) -> alt.Chart:
     frame = data.copy()
     frame["total_spend"] = frame[list(DEFAULT_CHANNELS)].sum(axis=1)
@@ -1227,10 +1512,10 @@ with business_goals_tab:
             )
 
     st.download_button(
-        "Download GenAI evidence packet",
-        data=json.dumps(evidence_packet, indent=2, default=str).encode("utf-8"),
-        file_name="mixalyzer_genai_evidence_packet.json",
-        mime="application/json",
+        "Download evidence workbook",
+        data=build_evidence_workbook(evidence_packet),
+        file_name="mixalyzer_genai_evidence_packet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_business_goals_evidence_packet",
         use_container_width=True,
     )
@@ -1431,36 +1716,39 @@ with optimization_tab:
                 st.markdown(f"<div class='recommendation'>{item}</div>", unsafe_allow_html=True)
 
         st.divider()
-        report = build_executive_report(
-            data=data,
-            contribution=contribution_df,
-            optimization=optimization,
-            simulation=simulation,
-            evaluation=evaluation_results,
-            recommendations=deterministic_recommendations,
-            scorecard=optimization_scorecard,
-        )
         st.download_button(
-            "Download executive report",
-            data=report.encode("utf-8"),
-            file_name="marketing_mix_executive_report.md",
-            mime="text/markdown",
+            "Download executive PDF",
+            data=build_executive_report_pdf(
+                data=data,
+                contribution=contribution_df,
+                optimization=optimization,
+                simulation=simulation,
+                evaluation=evaluation_results,
+                recommendations=deterministic_recommendations,
+                scorecard=optimization_scorecard,
+            ),
+            file_name="marketing_mix_executive_report.pdf",
+            mime="application/pdf",
             key="download_optimization_executive_report",
             use_container_width=True,
         )
         st.download_button(
-            "Download allocation CSV",
-            data=optimization["allocation"].to_csv(index=False).encode("utf-8"),
-            file_name="recommended_budget_allocation.csv",
-            mime="text/csv",
-            key="download_optimization_allocation_csv",
+            "Download allocation workbook",
+            data=build_allocation_workbook(
+                optimization,
+                optimization_scorecard,
+                deterministic_recommendations,
+            ),
+            file_name="recommended_budget_allocation.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_optimization_allocation_workbook",
             use_container_width=True,
         )
         st.download_button(
-            "Download GenAI evidence packet",
-            data=json.dumps(optimization_evidence_packet, indent=2, default=str).encode("utf-8"),
-            file_name="mixalyzer_genai_evidence_packet.json",
-            mime="application/json",
+            "Download evidence workbook",
+            data=build_evidence_workbook(optimization_evidence_packet),
+            file_name="mixalyzer_genai_evidence_packet.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_optimization_evidence_packet",
             use_container_width=True,
         )

@@ -1,6 +1,8 @@
 altair==5.5.0
 numpy==2.0.2
 openai==2.21.0
+openpyxl==3.1.5
 pandas==2.3.3
 python-dotenv==1.2.1
+reportlab==4.4.10
 streamlit==1.50.0
