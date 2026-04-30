@@ -10,6 +10,8 @@ from marketing_mix_model import (
     apply_column_mapping,
     apply_adstock,
     build_response_curve,
+    build_business_kpi_scorecard,
+    build_genai_evidence_packet,
     assess_data_readiness,
     compare_candidate_models,
     evaluate_model_against_baseline,
@@ -150,6 +152,41 @@ class MarketingMixModelTests(unittest.TestCase):
         self.assertEqual(set(optimization["allocation"]["Channel"]), set(CHANNEL_LABELS.values()))
         self.assertGreaterEqual(optimization["optimized_revenue"], optimization["current_revenue"])
         self.assertLess(abs(optimization["recommended_budget"] - optimization["current_budget"]), 1_000)
+
+    def test_business_kpi_scorecard_quantifies_targets(self):
+        optimization = optimize_budget(self.model, self.baseline)
+
+        scorecard = build_business_kpi_scorecard(
+            self.data,
+            optimization,
+            self.model.metrics,
+            target_roi_lift_pct=1.0,
+            target_cac_reduction_pct=1.0,
+            max_mape_pct=15.0,
+        )
+
+        self.assertEqual(
+            scorecard["Business KPI"].tolist(),
+            ["Marketing ROI lift", "CAC reduction", "Forecast quality"],
+        )
+        self.assertTrue({"Met", "Watch", "Needs customer data"}.issuperset(set(scorecard["Status"])))
+        self.assertTrue(np.isfinite(scorecard.loc[scorecard["Business KPI"] == "Marketing ROI lift", "Delta %"]).all())
+
+    def test_genai_evidence_packet_grounded_in_model_outputs(self):
+        contribution = estimate_channel_contribution(self.model, self.data)
+        optimization = optimize_budget(self.model, self.baseline)
+
+        packet = build_genai_evidence_packet(
+            self.model,
+            contribution,
+            optimization,
+            target_summary={"target_roi_lift_pct": 5.0},
+        )
+
+        self.assertEqual(packet["selected_ai_approach"], "Both: predictive ML plus grounded generative AI")
+        self.assertEqual(packet["prediction_layer"]["model"], self.model.model_kind)
+        self.assertGreaterEqual(len(packet["top_channel_evidence"]), 1)
+        self.assertGreaterEqual(len(packet["recommended_allocation"]), len(DEFAULT_CHANNELS))
 
     def test_recommendations_are_business_actions(self):
         contribution = estimate_channel_contribution(self.model, self.data)

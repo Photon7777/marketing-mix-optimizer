@@ -7,6 +7,8 @@ Mixalyzer helps growth and finance teams answer a practical business question: w
 ## Product Highlights
 
 - Marketing mix dashboard with spend, revenue, ROI, contribution, CAC, and channel mix.
+- Business KPI target setting for ROI lift, CAC reduction, and maximum planning error.
+- Goal-attainment scorecard that quantifies whether the optimized budget moves the selected KPI targets.
 - Auto column mapping for uploaded CSV files.
 - Data readiness scoring with checks for required fields, date quality, history length, numeric quality, CAC support, and spend coverage.
 - Ridge MMM with adstock/carryover, saturation-style features, seasonality, and trend.
@@ -16,7 +18,7 @@ Mixalyzer helps growth and finance teams answer a practical business question: w
 - Budget optimizer with recommended channel allocation.
 - Responsible AI and risk audit for privacy, bias, model reliability, and hallucination controls.
 - Executive report and allocation CSV downloads.
-- Optional OpenAI-generated recommendation narrative.
+- Optional OpenAI-generated recommendation narrative grounded in a downloadable MMM evidence packet.
 
 ## Run Locally
 

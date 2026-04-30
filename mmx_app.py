@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from html import escape
+import json
 import os
 from typing import Mapping
 
@@ -36,6 +37,8 @@ try:
         REQUIRED_MODEL_COLUMNS,
         apply_column_mapping,
         assess_data_readiness,
+        build_business_kpi_scorecard,
+        build_genai_evidence_packet,
         compare_candidate_models,
         fit_bayesian_marketing_mix_model,
         predict_with_interval,
@@ -85,6 +88,60 @@ except ImportError:
         prediction = model.predict(data)
         error = float(model.metrics.get("rmse", 1.0))
         return pd.DataFrame({"Prediction": prediction, "Lower": prediction - error, "Upper": prediction + error})
+
+    def build_business_kpi_scorecard(
+        data: pd.DataFrame,
+        optimization: Mapping[str, object],
+        model_metrics: Mapping[str, float] | None = None,
+        target_roi_lift_pct: float = 5.0,
+        target_cac_reduction_pct: float = 3.0,
+        max_mape_pct: float = 15.0,
+    ) -> pd.DataFrame:
+        current_budget = float(optimization.get("current_budget", 0.0) or 0.0)
+        recommended_budget = float(optimization.get("recommended_budget", current_budget) or 0.0)
+        current_revenue = float(optimization.get("current_revenue", 0.0) or 0.0)
+        optimized_revenue = float(optimization.get("optimized_revenue", current_revenue) or 0.0)
+        current_roi = current_revenue / current_budget if current_budget else 0.0
+        optimized_roi = optimized_revenue / recommended_budget if recommended_budget else 0.0
+        roi_lift = ((optimized_roi - current_roi) / current_roi * 100) if current_roi else 0.0
+        mape = float((model_metrics or {}).get("mape", 0.0))
+        return pd.DataFrame(
+            [
+                {
+                    "Business KPI": "Marketing ROI lift",
+                    "Current Value": current_roi,
+                    "Projected Value": optimized_roi,
+                    "Delta %": roi_lift,
+                    "Target": target_roi_lift_pct,
+                    "Status": "Met" if roi_lift >= target_roi_lift_pct else "Watch",
+                    "Interpretation": "Revenue generated per marketing dollar after budget reallocation.",
+                },
+                {
+                    "Business KPI": "CAC reduction",
+                    "Current Value": None,
+                    "Projected Value": None,
+                    "Delta %": None,
+                    "Target": target_cac_reduction_pct,
+                    "Status": "Needs customer data",
+                    "Interpretation": "Upload customer or conversion counts to quantify CAC impact.",
+                },
+                {
+                    "Business KPI": "Forecast quality",
+                    "Current Value": mape,
+                    "Projected Value": mape,
+                    "Delta %": None,
+                    "Target": max_mape_pct,
+                    "Status": "Met" if mape <= max_mape_pct else "Watch",
+                    "Interpretation": "Lower MAPE means the ML layer is reliable enough for budget planning.",
+                },
+            ]
+        )
+
+    def build_genai_evidence_packet(*args, **kwargs) -> dict[str, object]:
+        return {
+            "selected_ai_approach": "Both: predictive ML plus grounded generative AI",
+            "generation_layer": {"strategy": "Ground recommendations in MMM outputs."},
+        }
 
 try:
     from marketing_mix_model import evaluate_model_against_baseline
@@ -315,6 +372,40 @@ def pct(value: float) -> str:
 def signed_money(value: float) -> str:
     prefix = "+" if value >= 0 else "-"
     return f"{prefix}${abs(value):,.0f}"
+
+
+def scorecard_value(metric: str, value: object) -> str:
+    if pd.isna(value):
+        return "N/A"
+    numeric = float(value)
+    if metric == "Forecast quality":
+        return pct(numeric)
+    if "CAC" in metric:
+        return money(numeric)
+    return f"{numeric:.2f}x"
+
+
+def scorecard_delta(value: object) -> str:
+    if pd.isna(value):
+        return "N/A"
+    return pct(float(value))
+
+
+def display_business_scorecard(scorecard: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in scorecard.iterrows():
+        rows.append(
+            {
+                "Business KPI": row["Business KPI"],
+                "Current": scorecard_value(row["Business KPI"], row["Current Value"]),
+                "Projected": scorecard_value(row["Business KPI"], row["Projected Value"]),
+                "Delta": scorecard_delta(row["Delta %"]),
+                "Target": pct(float(row["Target"])),
+                "Status": row["Status"],
+                "Interpretation": row["Interpretation"],
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def render_metric_card(label: object, value: object, delta: object | None = None) -> None:
@@ -607,6 +698,7 @@ def build_executive_report(
     simulation: Mapping[str, object],
     evaluation: Mapping[str, object] | None,
     recommendations: list[str],
+    scorecard: pd.DataFrame | None = None,
 ) -> str:
     total_spend_value = float(data[list(DEFAULT_CHANNELS)].sum().sum())
     total_revenue_value = float(data[TARGET_COL].sum())
@@ -634,12 +726,28 @@ def build_executive_report(
         f"- Recommended next-period budget: {money(optimization['recommended_budget'])}",
         f"- Predicted revenue impact: {signed_money(optimization['revenue_delta'])} ({optimization['revenue_delta_pct']:.1f}%)",
         "",
-        "## Channel Insights",
-        f"- Highest estimated ROI: {top_roi['Channel']} at {float(top_roi['ROI']):.2f}x",
-        f"- Lowest estimated ROI: {weakest_roi['Channel']} at {float(weakest_roi['ROI']):.2f}x",
-        "",
-        "## Model Evaluation",
+        "## Business Goal Attainment",
     ]
+
+    if scorecard is not None and not scorecard.empty:
+        for _, row in display_business_scorecard(scorecard).iterrows():
+            lines.append(
+                f"- {row['Business KPI']}: {row['Status']} "
+                f"(current {row['Current']}, projected {row['Projected']}, delta {row['Delta']}, target {row['Target']})"
+            )
+    else:
+        lines.append("- Business KPI scorecard unavailable.")
+
+    lines.extend(
+        [
+            "",
+            "## Channel Insights",
+            f"- Highest estimated ROI: {top_roi['Channel']} at {float(top_roi['ROI']):.2f}x",
+            f"- Lowest estimated ROI: {weakest_roi['Channel']} at {float(weakest_roi['ROI']):.2f}x",
+            "",
+            "## Model Evaluation",
+        ]
+    )
 
     if evaluation:
         lines.extend(
@@ -816,6 +924,7 @@ def maybe_generate_openai_recommendations(
     contribution: pd.DataFrame,
     optimization: Mapping[str, object],
     simulation: Mapping[str, object],
+    evidence_packet: Mapping[str, object],
 ) -> str | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -827,6 +936,7 @@ def maybe_generate_openai_recommendations(
         client = OpenAI(api_key=api_key)
         allocation = optimization["allocation"].copy()
         payload = {
+            "ai_approach": evidence_packet,
             "top_roi": contribution[["Channel", "ROI", "Estimated Contribution"]].head(3).to_dict("records"),
             "recommended_allocation": allocation[
                 ["Channel", "Current Spend", "Recommended Spend", "Change %"]
@@ -841,10 +951,11 @@ def maybe_generate_openai_recommendations(
                     "role": "system",
                     "content": (
                         "You are a marketing analytics consultant. Give 3 concise, "
-                        "actionable budget recommendations. Mention revenue, ROI, and CAC."
+                        "actionable budget recommendations using only the evidence packet. "
+                        "Mention revenue, ROI, CAC, model confidence, and human review."
                     ),
                 },
-                {"role": "user", "content": str(payload)},
+                {"role": "user", "content": json.dumps(payload, default=str)},
             ],
             temperature=0.35,
         )
@@ -882,6 +993,10 @@ with st.sidebar:
     )
     regularization = st.slider("Model regularization", 0.1, 5.0, 1.5, 0.1)
     use_openai = st.toggle("OpenAI recommendation narrative", value=False)
+    with st.expander("Business KPI targets", expanded=True):
+        target_roi_lift_pct = st.slider("Target ROI lift", 0.0, 25.0, 5.0, 0.5, format="%.1f%%")
+        target_cac_reduction_pct = st.slider("Target CAC reduction", 0.0, 25.0, 3.0, 0.5, format="%.1f%%")
+        max_mape_pct = st.slider("Maximum planning MAPE", 1.0, 40.0, 15.0, 0.5, format="%.1f%%")
 
 
 try:
@@ -906,6 +1021,33 @@ total_revenue = float(data[TARGET_COL].sum())
 model_roi = float(total_revenue / total_spend) if total_spend else 0.0
 total_customers = float(data[CUSTOMER_COL].sum()) if CUSTOMER_COL in data.columns else 0.0
 cac = float(total_spend / total_customers) if total_customers else None
+current_weekly_budget = sum(float(baseline_scenario[channel]) for channel in DEFAULT_CHANNELS)
+default_optimization = optimize_with_confidence(
+    model,
+    baseline_scenario,
+    float(current_weekly_budget),
+    confidence_level,
+)
+target_summary = {
+    "target_roi_lift_pct": float(target_roi_lift_pct),
+    "target_cac_reduction_pct": float(target_cac_reduction_pct),
+    "max_mape_pct": float(max_mape_pct),
+}
+business_scorecard = build_business_kpi_scorecard(
+    data,
+    default_optimization,
+    model.metrics,
+    target_roi_lift_pct=target_roi_lift_pct,
+    target_cac_reduction_pct=target_cac_reduction_pct,
+    max_mape_pct=max_mape_pct,
+)
+evidence_packet = build_genai_evidence_packet(
+    model,
+    contribution_df,
+    default_optimization,
+    evaluation_results,
+    target_summary,
+)
 
 st.markdown(
     """
@@ -931,9 +1073,20 @@ for col, (label, value) in zip(kpi_cols, top_metrics):
     with col:
         render_metric_card(label, value)
 
-tabs = st.tabs(
+(
+    product_tab,
+    business_goals_tab,
+    data_setup_tab,
+    dashboard_tab,
+    simulation_tab,
+    optimization_tab,
+    evaluation_tab,
+    responsible_ai_tab,
+    model_tab,
+) = st.tabs(
     [
         "Product",
+        "Business Goals",
         "Data Setup",
         "Dashboard",
         "Simulation",
@@ -944,7 +1097,7 @@ tabs = st.tabs(
     ]
 )
 
-with tabs[0]:
+with product_tab:
     st.markdown(
         """
         <div class="hero">
@@ -993,8 +1146,8 @@ with tabs[0]:
     st.divider()
     product_cols = st.columns(4)
     product_metrics = [
-        ("Business objective", "ROI up"),
-        ("Operating KPI", "CAC down"),
+        ("Business objective", f"ROI +{target_roi_lift_pct:.1f}%"),
+        ("Operating KPI", f"CAC -{target_cac_reduction_pct:.1f}%"),
         ("Planning output", "Budget mix"),
         ("AI approach", "Prediction + GenAI"),
     ]
@@ -1021,7 +1174,66 @@ with tabs[0]:
                 unsafe_allow_html=True,
             )
 
-with tabs[1]:
+with business_goals_tab:
+    st.subheader("Business KPI targets")
+    goal_cols = st.columns(4)
+    goal_metrics = [
+        ("Primary KPI", "Marketing ROI", "Revenue per spend dollar"),
+        ("ROI lift target", pct(target_roi_lift_pct), "Optimized vs current mix"),
+        ("CAC reduction target", pct(target_cac_reduction_pct), "Requires customer data"),
+        ("Planning error target", f"MAPE <= {pct(max_mape_pct)}", "Train/test forecast quality"),
+    ]
+    for col, (label, value, delta) in zip(goal_cols, goal_metrics):
+        with col:
+            render_metric_card(label, value, delta)
+
+    st.subheader("Goal attainment from the current optimized plan")
+    scorecard_display = display_business_scorecard(business_scorecard)
+    status_cols = st.columns(3)
+    for col, metric_name in zip(status_cols, ["Marketing ROI lift", "CAC reduction", "Forecast quality"]):
+        row = scorecard_display.loc[scorecard_display["Business KPI"] == metric_name].iloc[0]
+        with col:
+            render_metric_card(metric_name, row["Status"], row["Delta"])
+
+    st.dataframe(scorecard_display, hide_index=True, use_container_width=True)
+
+    st.subheader("Selected AI approach")
+    approach_cols = st.columns(3)
+    approach_cards = [
+        (
+            "Prediction layer",
+            f"{model.model_kind} predicts revenue from spend, seasonality, adstock carryover, and diminishing returns.",
+        ),
+        (
+            "Generative layer",
+            "OpenAI recommendations are conditioned on the MMM evidence packet, not free-form guesses.",
+        ),
+        (
+            "Business decision layer",
+            "Budget changes are measured against ROI lift, CAC reduction, forecast error, and human review.",
+        ),
+    ]
+    for col, (title, body) in zip(approach_cols, approach_cards):
+        with col:
+            st.markdown(
+                f"""
+                <div class="feature-card">
+                  <h4>{title}</h4>
+                  <p>{body}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.download_button(
+        "Download GenAI evidence packet",
+        data=json.dumps(evidence_packet, indent=2, default=str).encode("utf-8"),
+        file_name="mixalyzer_genai_evidence_packet.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+with data_setup_tab:
     st.subheader("Data readiness and column mapping")
     ready_cols = st.columns(4)
     with ready_cols[0]:
@@ -1059,7 +1271,7 @@ with tabs[1]:
     st.subheader("Cleaned data preview")
     st.dataframe(data.head(20), hide_index=True, use_container_width=True)
 
-with tabs[2]:
+with dashboard_tab:
     left, right = st.columns([1.45, 1])
     with left:
         st.subheader("Spend and revenue trend")
@@ -1076,7 +1288,7 @@ with tabs[2]:
         st.subheader("Channel spend mix")
         st.altair_chart(channel_spend_chart(data), use_container_width=True)
 
-with tabs[3]:
+with simulation_tab:
     st.subheader("Budget simulation")
     sliders = {}
     slider_cols = st.columns(3)
@@ -1127,8 +1339,7 @@ with tabs[3]:
         curve = build_response_curve(model, baseline_scenario, selected_channel)
         st.altair_chart(response_curve_chart(curve), use_container_width=True)
 
-with tabs[4]:
-    current_weekly_budget = sum(float(baseline_scenario[channel]) for channel in DEFAULT_CHANNELS)
+with optimization_tab:
     target_budget = st.slider(
         "Next-period marketing budget",
         min_value=float(current_weekly_budget * 0.5),
@@ -1137,7 +1348,26 @@ with tabs[4]:
         step=500.0,
         format="$%.0f",
     )
-    optimization = optimize_with_confidence(model, baseline_scenario, target_budget, confidence_level)
+    optimization = (
+        default_optimization
+        if abs(float(target_budget) - float(current_weekly_budget)) < 1e-6
+        else optimize_with_confidence(model, baseline_scenario, target_budget, confidence_level)
+    )
+    optimization_scorecard = build_business_kpi_scorecard(
+        data,
+        optimization,
+        model.metrics,
+        target_roi_lift_pct=target_roi_lift_pct,
+        target_cac_reduction_pct=target_cac_reduction_pct,
+        max_mape_pct=max_mape_pct,
+    )
+    optimization_evidence_packet = build_genai_evidence_packet(
+        model,
+        contribution_df,
+        optimization,
+        evaluation_results,
+        target_summary,
+    )
 
     opt_cols = st.columns(4)
     optimization_metrics = [
@@ -1155,6 +1385,9 @@ with tabs[4]:
         f"{signed_money(optimization['revenue_delta_low'])} to {signed_money(optimization['revenue_delta_high'])} "
         f"at {int(confidence_level * 100)}% confidence."
     )
+
+    st.subheader("Business KPI impact")
+    st.dataframe(display_business_scorecard(optimization_scorecard), hide_index=True, use_container_width=True)
 
     opt_left, opt_right = st.columns([1.2, 1])
     with opt_left:
@@ -1179,7 +1412,12 @@ with tabs[4]:
     with opt_right:
         st.subheader("AI recommendation panel")
         narrative = (
-            maybe_generate_openai_recommendations(contribution_df, optimization, simulation)
+            maybe_generate_openai_recommendations(
+                contribution_df,
+                optimization,
+                simulation,
+                optimization_evidence_packet,
+            )
             if use_openai
             else None
         )
@@ -1198,6 +1436,7 @@ with tabs[4]:
             simulation=simulation,
             evaluation=evaluation_results,
             recommendations=deterministic_recommendations,
+            scorecard=optimization_scorecard,
         )
         st.download_button(
             "Download executive report",
@@ -1213,8 +1452,15 @@ with tabs[4]:
             mime="text/csv",
             use_container_width=True,
         )
+        st.download_button(
+            "Download GenAI evidence packet",
+            data=json.dumps(optimization_evidence_packet, indent=2, default=str).encode("utf-8"),
+            file_name="mixalyzer_genai_evidence_packet.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
-with tabs[5]:
+with evaluation_tab:
     st.subheader("Model comparison")
     if not model_comparison_df.empty:
         best_model = model_comparison_df.iloc[0]
@@ -1286,7 +1532,7 @@ with tabs[5]:
     else:
         st.info("Upload at least 12 dated observations to show train/test evaluation.")
 
-with tabs[6]:
+with responsible_ai_tab:
     st.subheader("Responsible AI and risk audit")
     risk_df = build_responsible_ai_audit(data, evaluation_results, contribution_df)
     managed = int((risk_df["Status"] == "Managed").sum())
@@ -1317,7 +1563,7 @@ with tabs[6]:
 
     st.dataframe(risk_df, hide_index=True, use_container_width=True)
 
-with tabs[7]:
+with model_tab:
     model_left, model_right = st.columns([1, 1])
     with model_left:
         st.subheader("Training data")

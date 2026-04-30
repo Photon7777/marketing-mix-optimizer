@@ -886,6 +886,177 @@ def optimize_budget(
     }
 
 
+def build_business_kpi_scorecard(
+    data: pd.DataFrame,
+    optimization: Mapping[str, object],
+    model_metrics: Mapping[str, float] | None = None,
+    target_roi_lift_pct: float = 5.0,
+    target_cac_reduction_pct: float = 3.0,
+    max_mape_pct: float = 15.0,
+) -> pd.DataFrame:
+    """Translate MMM output into measurable business-goal attainment."""
+    frame = _coerce_model_input(data, DEFAULT_CHANNELS, require_revenue=True)
+    current_budget = float(optimization.get("current_budget", 0.0) or 0.0)
+    recommended_budget = float(optimization.get("recommended_budget", current_budget) or 0.0)
+    current_revenue = float(optimization.get("current_revenue", 0.0) or 0.0)
+    optimized_revenue = float(optimization.get("optimized_revenue", current_revenue) or 0.0)
+
+    current_roi = current_revenue / current_budget if current_budget else 0.0
+    optimized_roi = optimized_revenue / recommended_budget if recommended_budget else 0.0
+    roi_lift_pct = _safe_pct(optimized_roi - current_roi, current_roi)
+
+    rows = [
+        {
+            "Business KPI": "Marketing ROI lift",
+            "Current Value": current_roi,
+            "Projected Value": optimized_roi,
+            "Delta %": roi_lift_pct,
+            "Target": float(target_roi_lift_pct),
+            "Status": "Met" if roi_lift_pct >= float(target_roi_lift_pct) else "Watch",
+            "Interpretation": "Revenue generated per marketing dollar after budget reallocation.",
+        }
+    ]
+
+    total_revenue = float(pd.to_numeric(frame[TARGET_COL], errors="coerce").fillna(0).sum())
+    total_customers = (
+        float(pd.to_numeric(frame[CUSTOMER_COL], errors="coerce").fillna(0).sum())
+        if CUSTOMER_COL in frame.columns
+        else 0.0
+    )
+    if total_revenue > 0 and total_customers > 0:
+        revenue_per_customer = total_revenue / total_customers
+        current_customers = current_revenue / revenue_per_customer if revenue_per_customer else 0.0
+        optimized_customers = optimized_revenue / revenue_per_customer if revenue_per_customer else 0.0
+        current_cac = current_budget / current_customers if current_customers else 0.0
+        optimized_cac = recommended_budget / optimized_customers if optimized_customers else 0.0
+        cac_reduction_pct = _safe_pct(current_cac - optimized_cac, current_cac)
+        rows.append(
+            {
+                "Business KPI": "CAC reduction",
+                "Current Value": current_cac,
+                "Projected Value": optimized_cac,
+                "Delta %": cac_reduction_pct,
+                "Target": float(target_cac_reduction_pct),
+                "Status": "Met" if cac_reduction_pct >= float(target_cac_reduction_pct) else "Watch",
+                "Interpretation": "Estimated acquisition cost assuming revenue per customer stays stable.",
+            }
+        )
+    else:
+        rows.append(
+            {
+                "Business KPI": "CAC reduction",
+                "Current Value": np.nan,
+                "Projected Value": np.nan,
+                "Delta %": np.nan,
+                "Target": float(target_cac_reduction_pct),
+                "Status": "Needs customer data",
+                "Interpretation": "Upload customer or conversion counts to quantify CAC impact.",
+            }
+        )
+
+    mape = float((model_metrics or {}).get("mape", np.nan))
+    rows.append(
+        {
+            "Business KPI": "Forecast quality",
+            "Current Value": mape,
+            "Projected Value": mape,
+            "Delta %": np.nan,
+            "Target": float(max_mape_pct),
+            "Status": "Met" if np.isfinite(mape) and mape <= float(max_mape_pct) else "Watch",
+            "Interpretation": "Lower MAPE means the ML layer is reliable enough for budget planning.",
+        }
+    )
+
+    return pd.DataFrame(rows)
+
+
+def build_genai_evidence_packet(
+    model: MarketingMixModel,
+    contribution_df: pd.DataFrame,
+    optimization: Mapping[str, object],
+    evaluation: Mapping[str, object] | None = None,
+    target_summary: Mapping[str, float] | None = None,
+) -> Dict[str, object]:
+    """Create a structured evidence payload for grounded recommendation generation."""
+    contribution = contribution_df.copy()
+    if not contribution.empty:
+        contribution = contribution.sort_values("ROI", ascending=False)
+
+    allocation = optimization.get("allocation")
+    allocation_records: list[dict[str, object]] = []
+    if isinstance(allocation, pd.DataFrame) and not allocation.empty:
+        allocation_records = [
+            {
+                "channel": str(row["Channel"]),
+                "current_spend": round(float(row["Current Spend"]), 2),
+                "recommended_spend": round(float(row["Recommended Spend"]), 2),
+                "spend_shift": round(float(row["Spend Shift"]), 2),
+                "change_pct": round(float(row["Change %"]), 2),
+            }
+            for _, row in allocation.iterrows()
+        ]
+
+    evaluation_metrics = {}
+    if evaluation:
+        evaluation_metrics = {
+            "model_mape": round(float(evaluation["model_metrics"]["mape"]), 2),
+            "baseline_mape": round(float(evaluation["baseline_metrics"]["mape"]), 2),
+            "rmse_improvement_pct": round(float(evaluation["rmse_improvement_pct"]), 2),
+        }
+
+    return {
+        "selected_ai_approach": "Both: predictive ML plus grounded generative AI",
+        "prediction_layer": {
+            "model": model.model_kind,
+            "features": [
+                "weekly spend",
+                "seasonality",
+                "trend",
+                "adstock carryover",
+                "diminishing-return log spend transforms",
+            ],
+            "metrics": {
+                "r2": round(float(model.metrics.get("r2", 0.0)), 3),
+                "mape": round(float(model.metrics.get("mape", 0.0)), 2),
+                "rmse": round(float(model.metrics.get("rmse", 0.0)), 2),
+            },
+        },
+        "generation_layer": {
+            "strategy": "Use MMM outputs as the evidence packet for recommendation generation.",
+            "allowed_outputs": [
+                "budget shift recommendation",
+                "executive summary",
+                "risk caveat",
+                "KPI impact explanation",
+            ],
+            "guardrails": [
+                "Do not invent unsupported channels or revenue impact.",
+                "Mention uncertainty when confidence ranges are wide.",
+                "Require human review before media-buying changes.",
+            ],
+        },
+        "business_targets": dict(target_summary or {}),
+        "optimization": {
+            "current_budget": round(float(optimization.get("current_budget", 0.0) or 0.0), 2),
+            "recommended_budget": round(float(optimization.get("recommended_budget", 0.0) or 0.0), 2),
+            "revenue_delta_pct": round(float(optimization.get("revenue_delta_pct", 0.0) or 0.0), 2),
+            "revenue_delta_low": round(float(optimization.get("revenue_delta_low", 0.0) or 0.0), 2),
+            "revenue_delta_high": round(float(optimization.get("revenue_delta_high", 0.0) or 0.0), 2),
+        },
+        "top_channel_evidence": [
+            {
+                "channel": str(row["Channel"]),
+                "roi": round(float(row["ROI"]), 2),
+                "estimated_contribution": round(float(row["Estimated Contribution"]), 2),
+                "spend": round(float(row["Spend"]), 2),
+            }
+            for _, row in contribution.head(3).iterrows()
+        ],
+        "recommended_allocation": allocation_records,
+        "evaluation": evaluation_metrics,
+    }
+
+
 def generate_recommendations(
     contribution_df: pd.DataFrame,
     optimization: Mapping[str, object],
